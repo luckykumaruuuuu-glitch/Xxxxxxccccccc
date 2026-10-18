@@ -3,3 +3,7 @@
 
 # No need to store the pnpm store twice.
 .local
+native-android/.gradle
+native-android/build
+native-android/app/build
+native-android/source-package

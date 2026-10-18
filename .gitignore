@@ -47,3 +47,12 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Native Android source project
+native-android/.gradle/
+native-android/local.properties
+native-android/build/
+native-android/app/build/
+native-android/*.apk
+native-android/*.aab
+native-android/source-package/
