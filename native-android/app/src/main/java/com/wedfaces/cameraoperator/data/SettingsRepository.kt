@@ -10,6 +10,12 @@ data class SettingsSnapshot(
     val testMode: Boolean,
     val allowLocalHttp: Boolean,
     val keepScreenOn: Boolean,
+    val cameraPhotoLimit: String,
+    val onlyNewSinceLastSend: Boolean,
+    val folderWatchUri: String?,
+    val folderWatchEnabled: Boolean,
+    val includeExistingFolderFiles: Boolean,
+    val folderWatchActivatedAtMillis: Long,
 )
 
 class SettingsRepository(context: Context) {
@@ -24,6 +30,12 @@ class SettingsRepository(context: Context) {
         testMode = preferences.getBoolean(KEY_TEST_MODE, false),
         allowLocalHttp = preferences.getBoolean(KEY_ALLOW_LOCAL_HTTP, false),
         keepScreenOn = preferences.getBoolean(KEY_KEEP_SCREEN_ON, false),
+        cameraPhotoLimit = preferences.getString(KEY_CAMERA_PHOTO_LIMIT, "50") ?: "50",
+        onlyNewSinceLastSend = preferences.getBoolean(KEY_ONLY_NEW_SINCE_LAST_SEND, false),
+        folderWatchUri = preferences.getString(KEY_FOLDER_WATCH_URI, null),
+        folderWatchEnabled = preferences.getBoolean(KEY_FOLDER_WATCH_ENABLED, false),
+        includeExistingFolderFiles = preferences.getBoolean(KEY_INCLUDE_EXISTING_FOLDER_FILES, false),
+        folderWatchActivatedAtMillis = preferences.getLong(KEY_FOLDER_WATCH_ACTIVATED_AT, 0L),
     )
 
     fun saveServerUrl(value: String) {
@@ -53,6 +65,31 @@ class SettingsRepository(context: Context) {
         preferences.edit().putBoolean(KEY_KEEP_SCREEN_ON, enabled).apply()
     }
 
+    fun setCameraPhotoLimit(value: String) {
+        preferences.edit().putString(KEY_CAMERA_PHOTO_LIMIT, value.takeIf { it in setOf("50", "100", "all") } ?: "50").apply()
+    }
+
+    fun setOnlyNewSinceLastSend(enabled: Boolean) {
+        preferences.edit().putBoolean(KEY_ONLY_NEW_SINCE_LAST_SEND, enabled).apply()
+    }
+
+    fun setFolderWatch(uri: String?, enabled: Boolean, includeExisting: Boolean) {
+        val now = System.currentTimeMillis()
+        preferences.edit()
+            .putString(KEY_FOLDER_WATCH_URI, uri)
+            .putBoolean(KEY_FOLDER_WATCH_ENABLED, enabled)
+            .putBoolean(KEY_INCLUDE_EXISTING_FOLDER_FILES, includeExisting)
+            .putLong(KEY_FOLDER_WATCH_ACTIVATED_AT, if (enabled) now else 0L)
+            .apply()
+    }
+
+    fun setFolderWatchEnabled(enabled: Boolean) {
+        preferences.edit()
+            .putBoolean(KEY_FOLDER_WATCH_ENABLED, enabled)
+            .putLong(KEY_FOLDER_WATCH_ACTIVATED_AT, if (enabled) System.currentTimeMillis() else 0L)
+            .apply()
+    }
+
     private companion object {
         const val KEY_SERVER_URL = "server_url"
         const val KEY_EMAIL = "email"
@@ -61,5 +98,11 @@ class SettingsRepository(context: Context) {
         const val KEY_TEST_MODE = "test_mode"
         const val KEY_ALLOW_LOCAL_HTTP = "allow_local_http"
         const val KEY_KEEP_SCREEN_ON = "keep_screen_on"
+        const val KEY_CAMERA_PHOTO_LIMIT = "camera_photo_limit"
+        const val KEY_ONLY_NEW_SINCE_LAST_SEND = "only_new_since_last_send"
+        const val KEY_FOLDER_WATCH_URI = "folder_watch_uri"
+        const val KEY_FOLDER_WATCH_ENABLED = "folder_watch_enabled"
+        const val KEY_INCLUDE_EXISTING_FOLDER_FILES = "include_existing_folder_files"
+        const val KEY_FOLDER_WATCH_ACTIVATED_AT = "folder_watch_activated_at"
     }
 }

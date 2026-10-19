@@ -18,6 +18,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Sony Wi-Fi PTP/IP adapter. Browsing performs only GetStorageIDs,
@@ -28,6 +29,7 @@ class SonyPtpIpCameraAdapter(context: Context) : CameraGateway {
     private val connectivityManager = context.applicationContext
         .getSystemService(ConnectivityManager::class.java)
     private val operationMutex = Mutex()
+    private val downloadsWaiting = AtomicInteger(0)
     private var connection: PtpConnection? = null
     private var session: PtpSession? = null
 
@@ -102,8 +104,11 @@ class SonyPtpIpCameraAdapter(context: Context) : CameraGateway {
         }
 
     override suspend fun getThumbnail(objectId: String): ByteArray? =
-        operationMutex.withLock {
+        if (downloadsWaiting.get() > 0) {
+            null
+        } else operationMutex.withLock {
             withContext(Dispatchers.IO) {
+                if (downloadsWaiting.get() > 0) return@withContext null
                 val activeSession = session ?: return@withContext null
                 val handle = objectId.toLongOrNull() ?: return@withContext null
                 try {
@@ -119,30 +124,37 @@ class SonyPtpIpCameraAdapter(context: Context) : CameraGateway {
         objectId: String,
         destination: File,
         onProgress: (sent: Long, total: Long) -> Unit,
-    ) = operationMutex.withLock {
-        withContext(Dispatchers.IO) {
-            val activeSession = session ?: throw IllegalStateException("Camera disconnected before the original was retrieved.")
-            val handle = objectId.toLongOrNull() ?: throw IllegalArgumentException("Camera object handle is invalid.")
-            destination.parentFile?.mkdirs()
-            try {
-                FileOutputStream(destination).use { output ->
-                    activeSession.getObjectToStream(
-                        PtpDataType.ObjectHandle(handle),
-                        output,
-                        object : PtpSession.DataLoadListener {
-                            override fun onDataLoaded(loaded: Long, expected: Long) {
-                                onProgress(loaded, expected)
-                            }
-                        },
-                    )
+    ) {
+        downloadsWaiting.incrementAndGet()
+        try {
+            operationMutex.withLock {
+                withContext(Dispatchers.IO) {
+                    val activeSession = session ?: throw IllegalStateException("Camera disconnected before the original was retrieved.")
+                    val handle = objectId.toLongOrNull() ?: throw IllegalArgumentException("Camera object handle is invalid.")
+                    destination.parentFile?.mkdirs()
+                    try {
+                        FileOutputStream(destination).use { output ->
+                            activeSession.getObjectToStream(
+                                PtpDataType.ObjectHandle(handle),
+                                output,
+                                object : PtpSession.DataLoadListener {
+                                    override fun onDataLoaded(loaded: Long, expected: Long) {
+                                        onProgress(loaded, expected)
+                                    }
+                                },
+                            )
+                        }
+                        if (!destination.isFile || destination.length() == 0L) {
+                            throw IllegalStateException("The camera returned an empty original file.")
+                        }
+                    } catch (error: Exception) {
+                        destination.delete()
+                        throw error
+                    }
                 }
-                if (!destination.isFile || destination.length() == 0L) {
-                    throw IllegalStateException("The camera returned an empty original file.")
-                }
-            } catch (error: Exception) {
-                destination.delete()
-                throw error
             }
+        } finally {
+            downloadsWaiting.decrementAndGet()
         }
     }
 

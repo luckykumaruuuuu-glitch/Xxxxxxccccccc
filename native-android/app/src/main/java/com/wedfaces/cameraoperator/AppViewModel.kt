@@ -3,6 +3,7 @@ package com.wedfaces.cameraoperator
 import android.app.Application
 import android.net.Network
 import android.net.Uri
+import android.util.LruCache
 import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -45,6 +46,10 @@ data class AppUiState(
     val cameraModel: String? = null,
     val cameraNetworkMessage: String? = null,
     val cameraBusy: Boolean = false,
+    val keepScreenOn: Boolean = false,
+    val cameraPhotoLimit: String = "50",
+    val onlyNewSinceLastSend: Boolean = false,
+    val unsupportedCameraCount: Int = 0,
     val wifiSsidInput: String = "",
     val wifiPasswordInput: String = "",
     val photos: List<CameraPhoto> = emptyList(),
@@ -55,13 +60,27 @@ data class AppUiState(
     val busy: Boolean = false,
     val message: String? = null,
     val error: String? = null,
-)
+) {
+    fun visibleCameraPhotos(): List<CameraPhoto> {
+        val filtered = photos.filter { photo ->
+            photo.fileName.substringAfterLast('.', "").lowercase() in setOf("jpg", "jpeg", "png", "webp") &&
+                (!onlyNewSinceLastSend || !photo.alreadySent)
+        }
+        return when (cameraPhotoLimit) {
+            "50" -> filtered.take(50)
+            "100" -> filtered.take(100)
+            else -> filtered
+        }
+    }
+}
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val services = (application as CameraOperatorApp).services
     private val _state = MutableStateFlow(AppUiState())
     val state: StateFlow<AppUiState> = _state.asStateFlow()
     private var cameraNetwork: Network? = null
+    private val thumbnailCache = LruCache<String, ByteArray>(THUMBNAIL_CACHE_SIZE)
+    private val pendingThumbnails = mutableSetOf<String>()
 
     init {
         val settings = services.settings.snapshot()
@@ -72,6 +91,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             selectedAlbumName = settings.selectedAlbumName,
             testMode = settings.testMode,
             allowLocalHttp = settings.allowLocalHttp,
+            keepScreenOn = settings.keepScreenOn,
+            cameraPhotoLimit = settings.cameraPhotoLimit,
+            onlyNewSinceLastSend = settings.onlyNewSinceLastSend,
             signedIn = services.tokens.accessToken() != null,
             queue = services.queue.getAll(),
         )
@@ -121,6 +143,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun setLocalHttpAllowed(enabled: Boolean) {
         services.settings.setAllowLocalHttp(enabled)
         _state.value = _state.value.copy(allowLocalHttp = enabled)
+    }
+
+    fun setKeepScreenOn(enabled: Boolean) {
+        services.settings.setKeepScreenOn(enabled)
+        _state.value = _state.value.copy(keepScreenOn = enabled)
+    }
+
+    fun setCameraPhotoLimit(value: String) {
+        services.settings.setCameraPhotoLimit(value)
+        _state.value = _state.value.copy(cameraPhotoLimit = services.settings.snapshot().cameraPhotoLimit)
+    }
+
+    fun setOnlyNewSinceLastSend(enabled: Boolean) {
+        services.settings.setOnlyNewSinceLastSend(enabled)
+        _state.value = _state.value.copy(onlyNewSinceLastSend = enabled)
     }
 
     fun setTestMode(enabled: Boolean) {
@@ -278,22 +315,67 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
         _state.value = _state.value.copy(cameraBusy = true, error = null)
         try {
-            val photos = services.camera.listObjects()
-            _state.value = _state.value.copy(
-                cameraBusy = false,
-                photos = photos,
-                selectedPhotoIds = _state.value.selectedPhotoIds.intersect(photos.map { it.objectId }.toSet()),
-                cameraNetworkMessage = "Showing camera file information and thumbnails only. Originals are read only after you tap Send selected.",
-            )
-            photos.asSequence().filter { it.mimeType in SUPPORTED_MIME_TYPES }.take(30).forEach { photo ->
-                viewModelScope.launch {
-                    services.camera.getThumbnail(photo.objectId)?.let { bytes ->
-                        _state.value = _state.value.copy(thumbnails = _state.value.thumbnails + (photo.objectId to bytes))
-                    }
+            val photos = services.camera.listObjects().map { photo ->
+                if (photo.source == PhotoSource.CAMERA) {
+                    photo.copy(
+                        alreadySent = services.queue.isCameraObjectSent(
+                            photo.fileName,
+                            photo.sizeBytes,
+                            photo.capturedAtMillis,
+                        ),
+                    )
+                } else {
+                    photo
                 }
             }
+            val jpegStems = photos.asSequence()
+                .filter { it.fileName.substringAfterLast('.', "").lowercase() in JPEG_EXTENSIONS }
+                .map { it.fileName.substringBeforeLast('.', "").lowercase() }
+                .toSet()
+            val cameraPhotos = photos.filterNot { photo ->
+                photo.source == PhotoSource.CAMERA &&
+                    photo.fileName.substringAfterLast('.', "").lowercase() in RAW_EXTENSIONS &&
+                    photo.fileName.substringBeforeLast('.', "").lowercase() in jpegStems
+            }
+            val supported = cameraPhotos.filter(::isSupported)
+            _state.value = _state.value.copy(
+                cameraBusy = false,
+                photos = cameraPhotos,
+                unsupportedCameraCount = cameraPhotos.count { !isSupported(it) },
+                thumbnails = emptyMap(),
+                selectedPhotoIds = _state.value.selectedPhotoIds.intersect(supported.map { it.objectId }.toSet()),
+                cameraNetworkMessage = "Showing camera file information and thumbnails only. Originals are read only after you tap Send selected.",
+            )
         } catch (error: Exception) {
             _state.value = _state.value.copy(cameraBusy = false, error = error.message ?: "Could not list camera images.")
+        }
+    }
+
+    fun requestThumbnail(objectId: String) {
+        thumbnailCache.get(objectId)?.let { cached ->
+            _state.value = _state.value.copy(thumbnails = _state.value.thumbnails + (objectId to cached))
+            return
+        }
+        if (_state.value.thumbnails.containsKey(objectId) || !pendingThumbnails.add(objectId)) return
+        if (!_state.value.cameraConnected || _state.value.testMode) {
+            pendingThumbnails.remove(objectId)
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val bytes = withContext(Dispatchers.IO) { services.camera.getThumbnail(objectId) }
+                if (bytes != null && _state.value.cameraConnected) {
+                    thumbnailCache.put(objectId, bytes)
+                    val updated = _state.value.thumbnails + (objectId to bytes)
+                    _state.value = _state.value.copy(
+                        thumbnails = updated.entries
+                            .takeLast(THUMBNAIL_CACHE_SIZE)
+                            .associate { it.toPair() },
+                    )
+                }
+            } finally {
+                pendingThumbnails.remove(objectId)
+            }
         }
     }
 
@@ -307,6 +389,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             photos = emptyList(),
             selectedPhotoIds = emptySet(),
             thumbnails = emptyMap(),
+            unsupportedCameraCount = 0,
             cameraNetworkMessage = "Camera disconnected.",
         )
     }
@@ -356,7 +439,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectAllSupported() {
         _state.value = _state.value.copy(
-            selectedPhotoIds = _state.value.photos.filter(::isSupported).map { it.objectId }.toSet(),
+            selectedPhotoIds = _state.value.visibleCameraPhotos().map { it.objectId }.toSet(),
         )
     }
 
@@ -383,6 +466,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
         val batchId = UUID.randomUUID().toString()
         _state.value = current.copy(busy = true, error = null, message = null, destination = AppDestination.QUEUE)
+        val hasCameraPhotos = selected.any { it.source == PhotoSource.CAMERA }
+        services.queue.createBatch(batchId, albumId, downloadComplete = !hasCameraPhotos)
         for (photo in selected) {
             val item = TransferQueueRepository.newTransfer(
                 batchId = batchId,
@@ -393,51 +478,58 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 fileName = safeFileName(photo.fileName),
                 mimeType = mimeTypeFor(photo.fileName) ?: photo.mimeType.orEmpty(),
                 sizeBytes = photo.sizeBytes,
+                sourceCapturedAtMillis = photo.capturedAtMillis,
                 initialState = if (photo.source == PhotoSource.CAMERA) QueueState.DOWNLOADING else QueueState.READY_TO_UPLOAD,
             )
             services.queue.insert(item)
+            if (photo.source == PhotoSource.CAMERA) {
+                continue
+            }
             val destination = File(getApplication<Application>().filesDir, "transfers/${item.id}_${item.fileName}")
             try {
                 destination.parentFile?.mkdirs()
-                if (photo.source == PhotoSource.CAMERA) {
-                    services.queue.update(item.id, QueueState.DOWNLOADING, temporaryFilePath = destination.absolutePath)
-                    services.camera.downloadSelectedOriginal(photo.objectId, destination) { sent, _ ->
-                        services.queue.update(item.id, QueueState.DOWNLOADING, progressBytes = sent)
+                val uri = photo.testUri ?: throw IllegalStateException("The selected device image is no longer available.")
+                withContext(Dispatchers.IO) {
+                    getApplication<Application>().contentResolver.openInputStream(uri).use { input ->
+                        requireNotNull(input) { "Android could not open the selected image." }
+                        FileOutputStream(destination).use(input::copyTo)
                     }
-                    services.queue.update(
-                        item.id,
-                        QueueState.READY_TO_UPLOAD,
-                        progressBytes = destination.length(),
-                        temporaryFilePath = destination.absolutePath,
-                    )
-                } else {
-                    val uri = photo.testUri ?: throw IllegalStateException("The selected device image is no longer available.")
-                    withContext(Dispatchers.IO) {
-                        getApplication<Application>().contentResolver.openInputStream(uri).use { input ->
-                            requireNotNull(input) { "Android could not open the selected image." }
-                            FileOutputStream(destination).use(input::copyTo)
-                        }
-                    }
-                    if (destination.length() == 0L) throw IllegalStateException("The selected device image is empty.")
-                    services.queue.update(
-                        item.id,
-                        QueueState.READY_TO_UPLOAD,
-                        progressBytes = destination.length(),
-                        temporaryFilePath = destination.absolutePath,
-                    )
                 }
+                if (destination.length() == 0L) throw IllegalStateException("The selected device image is empty.")
+                services.queue.update(
+                    item.id,
+                    QueueState.READY_TO_UPLOAD,
+                    progressBytes = destination.length(),
+                    temporaryFilePath = destination.absolutePath,
+                )
             } catch (error: Exception) {
                 destination.delete()
                 services.queue.update(item.id, QueueState.FAILED, lastError = error.message ?: "Could not prepare this original.")
             }
         }
         val batch = services.queue.getBatch(batchId)
+        if (hasCameraPhotos) {
+            if (!current.cameraConnected) {
+                services.queue.setBatchDownloadComplete(batchId, true)
+                batch.filter { it.state == QueueState.DOWNLOADING }
+                    .forEach { services.queue.update(it.id, QueueState.FAILED, lastError = "Reconnect the camera before retrieving selected originals.") }
+            } else {
+                services.startCameraDownload(batchId)
+                _state.value = _state.value.copy(message = "Camera originals are downloading. Each finished file will enter the upload queue immediately.")
+            }
+        }
         if (batch.any { it.state == QueueState.READY_TO_UPLOAD } && batch.none { it.state == QueueState.FAILED }) {
             services.enqueueBatch(batchId)
-            _state.value = _state.value.copy(message = "Selected originals are queued. Upload starts when internet is available.")
+            if (!hasCameraPhotos) {
+                _state.value = _state.value.copy(message = "Selected originals are queued. Upload starts when internet is available.")
+            }
         } else if (batch.any { it.state == QueueState.READY_TO_UPLOAD }) {
             services.enqueueBatch(batchId)
-            _state.value = _state.value.copy(message = "Ready items are queued; failed camera retrievals need a retry.")
+            if (!hasCameraPhotos) {
+                _state.value = _state.value.copy(message = "Ready items are queued; failed image preparations need a retry.")
+            }
+        } else if (hasCameraPhotos && current.cameraConnected) {
+            // The foreground service enqueues each successfully retrieved original.
         } else {
             _state.value = _state.value.copy(error = "No originals could be prepared. Check the camera connection and try again.")
         }
@@ -450,7 +542,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             it.state == QueueState.FAILED ||
                 it.state == QueueState.WAITING_FOR_INTERNET ||
                 it.state == QueueState.IMPORT_REVIEW ||
-                it.state == QueueState.AUTH_REQUIRED
+                it.state == QueueState.AUTH_REQUIRED ||
+                it.state == QueueState.PAUSED
         }
             .forEach { item ->
                 val path = item.temporaryFilePath?.let(::File)
@@ -463,9 +556,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         lastError = null,
                         importStarted = false,
                     )
+                } else if (item.source == PhotoSource.CAMERA && item.state == QueueState.FAILED) {
+                    services.queue.update(
+                        item.id,
+                        QueueState.DOWNLOADING,
+                        progressBytes = 0,
+                        attempts = 0,
+                        lastError = null,
+                    )
                 }
             }
-        services.enqueueBatch(batchId)
+        if (services.queue.getBatch(batchId).any { it.state == QueueState.DOWNLOADING }) {
+            services.queue.setBatchDownloadComplete(batchId, false)
+            services.startCameraDownload(batchId)
+        } else {
+            services.enqueueBatch(batchId)
+        }
         _state.value = _state.value.copy(queue = services.queue.getAll(), message = "Retry queued.", error = null)
     }
 
@@ -536,7 +642,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }.toMap()
 
     private companion object {
+        const val THUMBNAIL_CACHE_SIZE = 8
         val SUPPORTED_EXTENSIONS = setOf("jpg", "jpeg", "png", "webp")
         val SUPPORTED_MIME_TYPES = setOf("image/jpeg", "image/png", "image/webp")
+        val JPEG_EXTENSIONS = setOf("jpg", "jpeg")
+        val RAW_EXTENSIONS = setOf("arw", "cr2", "cr3", "nef", "dng", "raw")
     }
 }

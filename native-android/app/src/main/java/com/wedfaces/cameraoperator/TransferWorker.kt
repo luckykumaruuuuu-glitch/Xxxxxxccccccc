@@ -10,12 +10,15 @@ import com.wedfaces.cameraoperator.network.WedFacesApiException
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 
 class TransferWorker(
@@ -29,7 +32,15 @@ class TransferWorker(
         val initialItems = services.queue.getBatch(batchId)
         if (initialItems.isEmpty()) return Result.success()
 
+        val alreadyComplete = initialItems.count {
+            it.state == QueueState.UPLOADED_WAITING_IMPORT ||
+                it.state == QueueState.IMPORTED ||
+                it.state == QueueState.FAILED
+        }
+        setForeground(TransferNotifications.workerForegroundInfo(applicationContext, batchId, alreadyComplete, initialItems.size))
         val semaphore = Semaphore(MAX_PARALLEL_UPLOADS)
+        val completedCount = AtomicInteger(alreadyComplete)
+        val notificationLock = Mutex()
         val outcomes = try {
             coroutineScope {
                 initialItems
@@ -37,7 +48,19 @@ class TransferWorker(
                     .map { item ->
                         async {
                             semaphore.withPermit {
-                                if (isStopped) UploadOutcome() else uploadOne(item)
+                                val outcome = if (isStopped) UploadOutcome() else uploadOne(item)
+                                val completed = completedCount.incrementAndGet()
+                                notificationLock.withLock {
+                                    setForeground(
+                                        TransferNotifications.workerForegroundInfo(
+                                            applicationContext,
+                                            batchId,
+                                            completed.coerceAtMost(initialItems.size),
+                                            initialItems.size,
+                                        ),
+                                    )
+                                }
+                                outcome
                             }
                         }
                     }
@@ -78,59 +101,71 @@ class TransferWorker(
 
         try {
             val albumId = uploaded.first().albumId
-            var status = services.api.getAlbumImportStatus(albumId)
-            services.queue.saveImportStatus(batchId, status)
-
-            val importAlreadyStarted = uploaded.any { it.importStarted }
-            if (!importAlreadyStarted) {
-                if (status.state == "RUNNING") {
-                    status = waitForImportStatus(batchId, albumId, status)
-                    if (status.state == "RUNNING") {
-                        scheduleImportRetry(batchId)
-                        return Result.success()
-                    }
-                }
-                if (status.state != "RUNNING") {
-                    services.api.startAlbumImport(albumId)
-                    uploaded.forEach {
-                        services.queue.update(
-                            it.id,
-                            QueueState.UPLOADED_WAITING_IMPORT,
-                            importStarted = true,
-                        )
-                    }
-                    // Let the server publish this run's status rather than reusing an older COMPLETED response.
-                    delay(1_500)
-                    status = services.api.getAlbumImportStatus(albumId)
-                    services.queue.saveImportStatus(batchId, status)
-                }
-            }
-
-            if (status.state == "COMPLETED" || status.state == "FAILED") {
-                finishImport(batchId, status)
-                return Result.success()
-            }
-            if (status.state == "NONE") {
-                delay(2_000)
-                status = services.api.getAlbumImportStatus(albumId)
+            return AlbumImportCoordinator.withAlbumLock(albumId) {
+                var status = services.api.getAlbumImportStatus(albumId)
                 services.queue.saveImportStatus(batchId, status)
-                if (status.state == "NONE") {
-                    scheduleImportRetry(batchId)
-                    return Result.success()
+
+                val importAlreadyStarted = uploaded.any { it.importStarted }
+                if (!importAlreadyStarted) {
+                    val downloadComplete = services.queue.isBatchDownloadComplete(batchId)
+                    val idleMillis = System.currentTimeMillis() -
+                        (uploaded.maxOfOrNull { it.updatedAtMillis } ?: System.currentTimeMillis())
+                    val importDue = downloadComplete ||
+                        uploaded.size >= IMPORT_FILE_THRESHOLD ||
+                        idleMillis >= IMPORT_IDLE_MILLIS
+                    if (!importDue && status.state != "RUNNING") {
+                        scheduleImportRetry(batchId, (IMPORT_IDLE_MILLIS - idleMillis).coerceAtLeast(1_000L))
+                        return@withAlbumLock Result.success()
+                    }
+                    if (status.state == "RUNNING") {
+                        status = waitForImportStatus(batchId, albumId, status)
+                        if (status.state == "RUNNING") {
+                            scheduleImportRetry(batchId)
+                            return@withAlbumLock Result.success()
+                        }
+                    }
+                    if (status.state != "RUNNING") {
+                        services.api.startAlbumImport(albumId)
+                        uploaded.forEach {
+                            services.queue.update(
+                                it.id,
+                                QueueState.UPLOADED_WAITING_IMPORT,
+                                importStarted = true,
+                            )
+                        }
+                        // Let the server publish this run's status rather than reusing an older COMPLETED response.
+                        delay(1_500)
+                        status = services.api.getAlbumImportStatus(albumId)
+                        services.queue.saveImportStatus(batchId, status)
+                    }
                 }
+
                 if (status.state == "COMPLETED" || status.state == "FAILED") {
                     finishImport(batchId, status)
-                    return Result.success()
+                    return@withAlbumLock Result.success()
                 }
-            }
+                if (status.state == "NONE") {
+                    delay(2_000)
+                    status = services.api.getAlbumImportStatus(albumId)
+                    services.queue.saveImportStatus(batchId, status)
+                    if (status.state == "NONE") {
+                        scheduleImportRetry(batchId)
+                        return@withAlbumLock Result.success()
+                    }
+                    if (status.state == "COMPLETED" || status.state == "FAILED") {
+                        finishImport(batchId, status)
+                        return@withAlbumLock Result.success()
+                    }
+                }
 
-            status = waitForImportStatus(batchId, albumId, status)
-            if (status.state == "COMPLETED" || status.state == "FAILED") {
-                finishImport(batchId, status)
-                return Result.success()
+                status = waitForImportStatus(batchId, albumId, status)
+                if (status.state == "COMPLETED" || status.state == "FAILED") {
+                    finishImport(batchId, status)
+                    return@withAlbumLock Result.success()
+                }
+                scheduleImportRetry(batchId)
+                Result.success()
             }
-            scheduleImportRetry(batchId)
-            return Result.success()
         } catch (error: CancellationException) {
             throw error
         } catch (error: WedFacesApiException) {
@@ -282,6 +317,13 @@ class TransferWorker(
             )
             if (result.state == QueueState.IMPORTED) {
                 result.item.temporaryFilePath?.let(::File)?.delete()
+                if (result.item.source == com.wedfaces.cameraoperator.model.PhotoSource.CAMERA) {
+                    services.queue.markCameraObjectSent(
+                        result.item.fileName,
+                        result.item.sizeBytes,
+                        result.item.sourceCapturedAtMillis,
+                    )
+                }
             }
         }
     }
@@ -292,8 +334,8 @@ class TransferWorker(
             .forEach { services.queue.update(it.id, QueueState.IMPORT_REVIEW, lastError = message) }
     }
 
-    private fun scheduleImportRetry(batchId: String) {
-        services.scheduleBatchRetry(batchId, exponentialBackoffMillis(runAttemptCount + 1))
+    private fun scheduleImportRetry(batchId: String, delayMillis: Long = exponentialBackoffMillis(runAttemptCount + 1)) {
+        services.scheduleBatchRetry(batchId, delayMillis)
     }
 
     private fun exponentialBackoffMillis(attempt: Int): Long {
@@ -310,6 +352,15 @@ class TransferWorker(
         const val KEY_BATCH_ID = "batch_id"
         const val MAX_PARALLEL_UPLOADS = 3
         const val MAX_ATTEMPTS_PER_ITEM = 5
+        const val IMPORT_FILE_THRESHOLD = 25
+        const val IMPORT_IDLE_MILLIS = 20_000L
         private const val MAX_BACKOFF_MILLIS = 6 * 60 * 60 * 1_000L
     }
+}
+
+private object AlbumImportCoordinator {
+    private val albumLocks = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
+
+    suspend fun <T> withAlbumLock(albumId: String, action: suspend () -> T): T =
+        albumLocks.computeIfAbsent(albumId) { Mutex() }.withLock { action() }
 }

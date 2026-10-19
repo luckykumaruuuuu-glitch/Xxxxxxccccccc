@@ -46,6 +46,7 @@ class TransferQueueRepository(
         db.execSQL("CREATE INDEX transfers_updated_idx ON transfers(updated_at DESC)")
         createImportStatusTable(db)
         createSentCameraObjectsTable(db)
+        createTransferBatchesTable(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -58,6 +59,9 @@ class TransferQueueRepository(
         if (oldVersion < 4) {
             db.execSQL("ALTER TABLE $TABLE ADD COLUMN source_captured_at INTEGER")
             createSentCameraObjectsTable(db)
+        }
+        if (oldVersion < 5) {
+            createTransferBatchesTable(db)
         }
     }
 
@@ -179,8 +183,40 @@ class TransferQueueRepository(
 
     @Synchronized
     fun insert(item: TransferItem) {
+        createBatchIfMissing(item.batchId, item.albumId, item.source != PhotoSource.CAMERA)
         writableDatabase.insertOrThrow(TABLE, null, item.toContentValues())
     }
+
+    @Synchronized
+    fun createBatch(batchId: String, albumId: String, downloadComplete: Boolean) {
+        createBatchIfMissing(batchId, albumId, downloadComplete)
+    }
+
+    @Synchronized
+    fun setBatchDownloadComplete(batchId: String, complete: Boolean) {
+        writableDatabase.update(
+            BATCH_TABLE,
+            ContentValues().apply {
+                put("download_complete", if (complete) 1 else 0)
+                put("updated_at", System.currentTimeMillis())
+            },
+            "batch_id = ?",
+            arrayOf(batchId),
+        )
+    }
+
+    @Synchronized
+    fun isBatchDownloadComplete(batchId: String): Boolean =
+        readableDatabase.query(
+            BATCH_TABLE,
+            arrayOf("download_complete"),
+            "batch_id = ?",
+            arrayOf(batchId),
+            null,
+            null,
+            null,
+            "1",
+        ).use { it.moveToFirst() && it.getInt(0) == 1 }
 
     @Synchronized
     fun getAll(): List<TransferItem> =
@@ -249,6 +285,37 @@ class TransferQueueRepository(
             values,
             "batch_id = ? AND state NOT IN (?, ?, ?)",
             arrayOf(batchId, QueueState.IMPORTED.name, QueueState.CANCELLED.name, QueueState.FAILED.name),
+        )
+    }
+
+    @Synchronized
+    fun pauseBatch(batchId: String) {
+        writableDatabase.execSQL(
+            "UPDATE transfers SET state = ?, last_error = ?, updated_at = ? WHERE batch_id = ? AND state NOT IN (?, ?, ?)",
+            arrayOf(
+                QueueState.PAUSED.name,
+                "Paused by operator.",
+                System.currentTimeMillis(),
+                batchId,
+                QueueState.IMPORTED.name,
+                QueueState.CANCELLED.name,
+                QueueState.FAILED.name,
+            ),
+        )
+    }
+
+    @Synchronized
+    fun cancelBatchItems(batchId: String) {
+        writableDatabase.execSQL(
+            "UPDATE transfers SET state = ?, last_error = ?, updated_at = ? WHERE batch_id = ? AND state NOT IN (?, ?)",
+            arrayOf(
+                QueueState.CANCELLED.name,
+                "Cancelled locally; server-side staged files, if any, are unchanged.",
+                System.currentTimeMillis(),
+                batchId,
+                QueueState.IMPORTED.name,
+                QueueState.CANCELLED.name,
+            ),
         )
     }
 
@@ -324,6 +391,31 @@ class TransferQueueRepository(
         )
     }
 
+    private fun createTransferBatchesTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS transfer_batches (
+              batch_id TEXT PRIMARY KEY NOT NULL,
+              album_id TEXT NOT NULL,
+              download_complete INTEGER NOT NULL,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            )
+            """.trimIndent(),
+        )
+    }
+
+    private fun createBatchIfMissing(batchId: String, albumId: String, downloadComplete: Boolean) {
+        val values = ContentValues().apply {
+            put("batch_id", batchId)
+            put("album_id", albumId)
+            put("download_complete", if (downloadComplete) 1 else 0)
+            put("created_at", System.currentTimeMillis())
+            put("updated_at", System.currentTimeMillis())
+        }
+        writableDatabase.insertWithOnConflict(BATCH_TABLE, null, values, SQLiteDatabase.CONFLICT_IGNORE)
+    }
+
     private fun cameraIdentityKey(objectName: String, sizeBytes: Long?, capturedAtMillis: Long?) =
         "${objectName.trim().lowercase(java.util.Locale.ROOT)}\u0000${sizeBytes ?: -1L}\u0000${capturedAtMillis ?: -1L}"
 
@@ -367,10 +459,11 @@ class TransferQueueRepository(
 
     companion object {
         private const val DATABASE_NAME = "camera_operator_queue.db"
-        private const val DATABASE_VERSION = 4
+        private const val DATABASE_VERSION = 5
         private const val TABLE = "transfers"
         private const val STATUS_TABLE = "import_status"
         private const val SENT_TABLE = "sent_camera_objects"
+        private const val BATCH_TABLE = "transfer_batches"
 
         fun newTransfer(
             batchId: String,

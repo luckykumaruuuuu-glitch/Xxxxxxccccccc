@@ -22,6 +22,7 @@ data class CameraPhoto(
 enum class PhotoSource {
     CAMERA,
     TEST_GALLERY,
+    FOLDER_WATCH,
 }
 
 enum class QueueState(val title: String) {
@@ -36,6 +37,7 @@ enum class QueueState(val title: String) {
     FAILED("Failed · retry available"),
     IMPORT_REVIEW("Import result needs review"),
     AUTH_REQUIRED("Sign in again"),
+    PAUSED("Paused"),
     UNSUPPORTED("Unsupported format"),
     CANCELLED("Cancelled"),
 }

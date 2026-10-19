@@ -7,6 +7,8 @@ import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.workDataOf
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.PeriodicWorkRequestBuilder
 import com.wedfaces.cameraoperator.camera.CameraNetworkController
 import com.wedfaces.cameraoperator.camera.SonyPtpIpCameraAdapter
 import com.wedfaces.cameraoperator.data.AndroidTokenStore
@@ -23,6 +25,7 @@ class CameraOperatorApp : Application() {
     override fun onCreate() {
         super.onCreate()
         services = AppServices(this)
+        TransferNotifications.createChannel(this)
     }
 
     internal fun replaceServicesForTest(testServices: AppServices) {
@@ -37,6 +40,7 @@ class AppServices(
     queueDatabaseName: String = "camera_operator_queue.db",
     private val retrySchedulerForTest: ((batchId: String, delayMillis: Long) -> Unit)? = null,
 ) {
+    private val appContext = application.applicationContext
     val settings = SettingsRepository(application)
     val tokens = tokenStore
     val queue = TransferQueueRepository(application, queueDatabaseName)
@@ -53,9 +57,20 @@ class AppServices(
     fun enqueueBatch(batchId: String) {
         workManager.enqueueUniqueWork(
             workName(batchId),
-            ExistingWorkPolicy.KEEP,
+            ExistingWorkPolicy.APPEND_OR_REPLACE,
             transferRequest(batchId).build(),
         )
+    }
+
+    fun startCameraDownload(batchId: String) {
+        val intent = android.content.Intent(appContext, CameraDownloadService::class.java)
+            .putExtra(CameraDownloadService.KEY_BATCH_ID, batchId)
+        androidx.core.content.ContextCompat.startForegroundService(appContext, intent)
+    }
+
+    fun pauseBatch(batchId: String) {
+        workManager.cancelUniqueWork(workName(batchId))
+        queue.pauseBatch(batchId)
     }
 
     fun scheduleBatchRetry(batchId: String, delayMillis: Long) {
@@ -91,5 +106,7 @@ class AppServices(
 
     fun cancelBatch(batchId: String) {
         workManager.cancelUniqueWork(workName(batchId))
+        queue.cancelBatchItems(batchId)
+        appContext.stopService(android.content.Intent(appContext, CameraDownloadService::class.java))
     }
 }

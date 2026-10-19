@@ -1,6 +1,7 @@
 package com.wedfaces.cameraoperator
 
 import android.Manifest
+import android.app.Activity
 import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.Bundle
@@ -66,6 +67,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -137,6 +141,37 @@ private fun CameraOperatorRoot(viewModel: AppViewModel = viewModel()) {
         else viewModel.onCameraPermissionDenied()
         useCurrentAfterPermission = false
     }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) {
+        viewModel.sendSelected()
+    }
+    val beginSend: () -> Unit = {
+        if (
+            Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            viewModel.sendSelected()
+        }
+    }
+    val keepScreenOn = state.keepScreenOn && state.queue.any {
+        it.state == QueueState.DOWNLOADING ||
+            it.state == QueueState.READY_TO_UPLOAD ||
+            it.state == QueueState.UPLOADING
+    }
+    SideEffect {
+        val window = (context as? Activity)?.window ?: return@SideEffect
+        if (keepScreenOn) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+    DisposableEffect(context) {
+        onDispose {
+            (context as? Activity)?.window
+                ?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
     fun requestWifiPermission(useCurrent: Boolean) {
         useCurrentAfterPermission = useCurrent
         val permission = if (Build.VERSION.SDK_INT >= 33) {
@@ -191,7 +226,10 @@ private fun CameraOperatorRoot(viewModel: AppViewModel = viewModel()) {
                     onToggle = viewModel::togglePhoto,
                     onSelectAll = viewModel::selectAllSupported,
                     onClearSelection = viewModel::clearSelection,
-                    onSend = viewModel::sendSelected,
+                    onSend = beginSend,
+                    onRequestThumbnail = viewModel::requestThumbnail,
+                    onPhotoLimit = viewModel::setCameraPhotoLimit,
+                    onOnlyNew = viewModel::setOnlyNewSinceLastSend,
                     onPickImages = {
                         imagePicker.launch(PickVisualMediaRequest(PickVisualMedia.ImageOnly))
                     },
@@ -211,6 +249,7 @@ private fun CameraOperatorRoot(viewModel: AppViewModel = viewModel()) {
                     onSignOut = viewModel::signOut,
                     onToggleTestMode = viewModel::setTestMode,
                     onToggleLocalHttp = viewModel::setLocalHttpAllowed,
+                    onToggleKeepScreenOn = viewModel::setKeepScreenOn,
                     onSelectAlbum = viewModel::selectAlbum,
                     onReloadAlbums = viewModel::refreshAlbums,
                     diagnostics = viewModel.diagnostics(),
@@ -280,10 +319,15 @@ private fun CameraScreen(
     onSelectAll: () -> Unit,
     onClearSelection: () -> Unit,
     onSend: () -> Unit,
+    onRequestThumbnail: (String) -> Unit,
+    onPhotoLimit: (String) -> Unit,
+    onOnlyNew: (Boolean) -> Unit,
     onPickImages: () -> Unit,
 ) {
     var ssid by rememberSaveable { mutableStateOf("") }
     var password by rememberSaveable { mutableStateOf("") }
+    var photoLimitMenu by remember { mutableStateOf(false) }
+    val visiblePhotos = state.visibleCameraPhotos()
     val canSend = state.signedIn && state.selectedAlbumId != null && state.selectedPhotoIds.isNotEmpty() && !state.busy
 
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
@@ -360,18 +404,53 @@ private fun CameraScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column {
-                Text("${state.photos.size} images", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Text("${visiblePhotos.size} images shown", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                 Text("${state.selectedPhotoIds.size} selected · ${state.selectedAlbumName ?: "No album selected"}", fontSize = 11.sp, color = Color(0xFFBDBDBD))
             }
-            Row {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box {
+                    TextButton(onClick = { photoLimitMenu = true }) { Text("Last ${state.cameraPhotoLimit}") }
+                    DropdownMenu(expanded = photoLimitMenu, onDismissRequest = { photoLimitMenu = false }) {
+                        listOf("50", "100", "all").forEach { limit ->
+                            DropdownMenuItem(
+                                text = { Text(if (limit == "all") "All" else "Last $limit") },
+                                onClick = { onPhotoLimit(limit); photoLimitMenu = false },
+                            )
+                        }
+                    }
+                }
                 TextButton(onClick = onSelectAll) { Text("Select all") }
                 TextButton(onClick = onClearSelection) { Text("Clear") }
             }
         }
-        if (state.photos.isEmpty()) {
+        if (state.unsupportedCameraCount > 0) {
+            Text(
+                "${state.unsupportedCameraCount} RAW or video files are not supported by the server and are not selectable.",
+                color = Color(0xFFBDBDBD),
+                fontSize = 11.sp,
+                modifier = Modifier.padding(bottom = 5.dp),
+            )
+        }
+        SettingSwitch(
+            title = "Only new since last send",
+            detail = "Hide camera images already imported to WED Faces. Turn off to select and resend them.",
+            checked = state.onlyNewSinceLastSend,
+            onCheckedChange = onOnlyNew,
+        )
+        if (visiblePhotos.isEmpty()) {
             EmptyState(
-                title = if (state.testMode) "No device images chosen" else "No camera images",
-                detail = if (state.testMode) "Choose actual images from this device to exercise the transfer flow." else "Connect to your supported Sony camera, then refresh to browse its card.",
+                title = when {
+                    state.onlyNewSinceLastSend && state.photos.isNotEmpty() -> "No new supported images"
+                    state.unsupportedCameraCount > 0 -> "No supported images"
+                    state.testMode -> "No device images chosen"
+                    else -> "No camera images"
+                },
+                detail = when {
+                    state.onlyNewSinceLastSend && state.photos.isNotEmpty() -> "Turn off Only new since last send to review or resend imported images."
+                    state.unsupportedCameraCount > 0 -> "This card has no JPG, PNG, or WEBP images supported by the server."
+                    state.testMode -> "Choose actual images from this device to exercise the transfer flow."
+                    else -> "Connect to your supported Sony camera, then refresh to browse its card."
+                },
             )
         } else {
             LazyVerticalGrid(
@@ -380,8 +459,14 @@ private fun CameraScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                items(state.photos, key = { it.objectId }) { photo ->
-                    PhotoTile(photo, photo.objectId in state.selectedPhotoIds, state.thumbnails[photo.objectId], onClick = { onToggle(photo) })
+                items(visiblePhotos, key = { it.objectId }) { photo ->
+                    PhotoTile(
+                        photo,
+                        photo.objectId in state.selectedPhotoIds,
+                        state.thumbnails[photo.objectId],
+                        onVisible = { onRequestThumbnail(photo.objectId) },
+                        onClick = { onToggle(photo) },
+                    )
                 }
             }
         }
@@ -398,7 +483,16 @@ private fun CameraScreen(
 }
 
 @Composable
-private fun PhotoTile(photo: CameraPhoto, selected: Boolean, thumbnailBytes: ByteArray?, onClick: () -> Unit) {
+private fun PhotoTile(
+    photo: CameraPhoto,
+    selected: Boolean,
+    thumbnailBytes: ByteArray?,
+    onVisible: () -> Unit,
+    onClick: () -> Unit,
+) {
+    LaunchedEffect(photo.objectId, photo.source) {
+        if (photo.source == PhotoSource.CAMERA) onVisible()
+    }
     val bitmap = remember(thumbnailBytes) {
         thumbnailBytes?.let { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
     }
@@ -425,6 +519,9 @@ private fun PhotoTile(photo: CameraPhoto, selected: Boolean, thumbnailBytes: Byt
             }
         }
         Text(photo.fileName, modifier = Modifier.padding(start = 3.dp, top = 5.dp), maxLines = 1, fontSize = 10.sp)
+        if (photo.alreadySent) {
+            Text("Already sent · resend available", modifier = Modifier.padding(start = 3.dp), color = Color(0xFFBDBDBD), fontSize = 9.sp)
+        }
         Text(
             photo.sizeBytes?.let(::formatBytes) ?: if (photo.source == PhotoSource.TEST_GALLERY) "Device image" else "Camera file",
             modifier = Modifier.padding(start = 3.dp, bottom = 2.dp),
@@ -458,7 +555,8 @@ private fun QueueScreen(
                         it.state == QueueState.FAILED ||
                             it.state == QueueState.WAITING_FOR_INTERNET ||
                             it.state == QueueState.IMPORT_REVIEW ||
-                            it.state == QueueState.AUTH_REQUIRED
+                            it.state == QueueState.AUTH_REQUIRED ||
+                            it.state == QueueState.PAUSED
                     }
                     val cancellable = batch.any { it.state != QueueState.IMPORTED && it.state != QueueState.CANCELLED }
                     Card(
@@ -566,6 +664,7 @@ private fun SettingsScreen(
     onSignOut: () -> Unit,
     onToggleTestMode: (Boolean) -> Unit,
     onToggleLocalHttp: (Boolean) -> Unit,
+    onToggleKeepScreenOn: (Boolean) -> Unit,
     onSelectAlbum: (com.wedfaces.cameraoperator.model.Album) -> Unit,
     onReloadAlbums: () -> Unit,
     diagnostics: String,
@@ -653,6 +752,13 @@ private fun SettingsScreen(
                     detail = "Choose real device images with Android's photo picker; no camera is connected.",
                     checked = state.testMode,
                     onCheckedChange = onToggleTestMode,
+                )
+                HorizontalDivider(color = Line)
+                SettingSwitch(
+                    title = "Keep screen on during transfer",
+                    detail = "Keep this screen awake while camera downloads or uploads are active.",
+                    checked = state.keepScreenOn,
+                    onCheckedChange = onToggleKeepScreenOn,
                 )
                 if (BuildConfig.DEBUG) {
                     HorizontalDivider(color = Line)
