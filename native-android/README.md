@@ -43,7 +43,9 @@ USB/OTG, Canon, and Nikon are not implemented. Do not treat the Android photo pi
 
 Queue records are stored in SQLite and survive navigation and app restarts. Once selected originals are available as app-owned files, WorkManager runs the upload/import batch when an internet connection is available. The original on the camera is never modified or deleted. Temporary copies are removed after successful server import; failed/retryable copies remain available to the queue.
 
-If Android stops the app during an active camera download, the queue keeps the operation and asks the operator to reconnect/retry; PTP sessions themselves are not persisted by Android. If an upload has already been accepted by the server, canceling local follow-up does not remove that server-side staged upload.
+Camera originals are downloaded one at a time through a serialized foreground-service queue. Each completed original is made upload-ready and enqueued immediately; the next camera download does not need to finish first. Interruptions are marked for retry after reconnecting to the camera. PTP sessions themselves are not persisted by Android.
+
+If an upload has already been accepted by the server, canceling local follow-up does not remove that server-side staged upload.
 
 ## Test Mode
 

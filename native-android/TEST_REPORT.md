@@ -2,13 +2,20 @@
 
 Date: 2026-10-19
 
-## Tests passed
+## Current continuation verification
 
-- `./gradlew :app:testDebugUnitTest` — 9 tests passed:
+- Added three pipeline tests covering immediate per-original upload enqueue, per-file camera failure isolation, and interrupted-download recovery. They are present in source but were not executed in this continuation.
+- Attempted `./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug` from `native-android/`; Gradle stopped before compilation because no Android SDK is configured (`ANDROID_HOME` and `ANDROID_SDK_ROOT` are unset and `local.properties` is absent).
+- Android SDK installation was not available through the configured Replit system-package index. No claim is made that the new tests, build, or lint pass.
+- `./gradlew :app:tasks --all` passed, confirming Gradle project configuration only; `git diff --check` also passed. Neither check compiles the Android source.
+- No emulator, physical Android device, supported Sony camera, or live WED Faces server was available. Device and server compatibility remain unverified.
+
+## Earlier imported report (not rerun in this continuation)
+
+- The imported report recorded `./gradlew :app:testDebugUnitTest` — 9 tests passed:
   - 8 WED Faces API contract tests using MockWebServer (login, album IDs, multipart upload, import path, import counters/failures JSON, refresh, unsupported formats, and HTTP 413).
   - 1 SQLite persistence test confirming server counters and all failed filenames survive closing and reopening the database.
-- `./gradlew :app:assembleDebug` — passed. Debug APK generated at `app/build/outputs/apk/debug/app-debug.apk`.
-- `./gradlew :app:lintDebug` — passed with 13 warnings and no errors.
+- The imported report also recorded `./gradlew :app:assembleDebug` as passed and `./gradlew :app:lintDebug` as passed with 13 warnings and no errors. These results were not reproducible in this continuation because the Android SDK is missing.
 
 ## Issues found and resolved
 
