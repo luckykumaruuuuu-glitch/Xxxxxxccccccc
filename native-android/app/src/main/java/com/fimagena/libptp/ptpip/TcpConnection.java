@@ -24,7 +24,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.net.SocketFactory;
+import javax.net.SocketFactory;
 import java.util.concurrent.BlockingQueue;
 import java.util.logging.Logger;
 
@@ -98,7 +98,7 @@ public class TcpConnection {
             mSocket.setSoTimeout(0);
             mSocket.setKeepAlive(true);
             mSocket.setTcpNoDelay(true);
-            mSocket.connect(server);
+            mSocket.connect(server, 15000);
             mOut = mSocket.getOutputStream();
             mIn = mSocket.getInputStream();
             mLastActivityTimestamp = System.currentTimeMillis();

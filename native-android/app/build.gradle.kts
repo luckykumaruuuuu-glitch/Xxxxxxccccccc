@@ -45,6 +45,10 @@ android {
         buildConfig = true
     }
 
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
+
     packaging {
         resources {
             excludes += setOf("META-INF/AL2.0", "META-INF/LGPL2.1")
@@ -73,5 +77,6 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    testImplementation("org.robolectric:robolectric:4.14.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

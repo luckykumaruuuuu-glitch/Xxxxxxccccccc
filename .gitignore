@@ -50,6 +50,7 @@ Thumbs.db
 
 # Native Android source project
 native-android/.gradle/
+native-android/.kotlin/
 native-android/local.properties
 native-android/build/
 native-android/app/build/

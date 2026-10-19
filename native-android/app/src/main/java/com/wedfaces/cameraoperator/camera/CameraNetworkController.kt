@@ -19,7 +19,7 @@ class CameraNetworkController(context: Context) {
         ssid: String,
         passphrase: String,
         onConnected: (Network) -> Unit,
-        onLost: () -> Unit,
+        onNetworkLost: () -> Unit,
         onFailure: (String) -> Unit,
     ) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
@@ -51,7 +51,7 @@ class CameraNetworkController(context: Context) {
                 }
 
                 override fun onLost(network: Network) {
-                    onLost()
+                    onNetworkLost()
                 }
 
                 override fun onUnavailable() {

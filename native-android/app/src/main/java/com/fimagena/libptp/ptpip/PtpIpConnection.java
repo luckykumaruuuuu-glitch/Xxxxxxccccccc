@@ -28,7 +28,7 @@ import com.fimagena.libptp.PtpTransport;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.SocketFactory;
+import javax.net.SocketFactory;
 import java.util.concurrent.BlockingDeque;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingDeque;

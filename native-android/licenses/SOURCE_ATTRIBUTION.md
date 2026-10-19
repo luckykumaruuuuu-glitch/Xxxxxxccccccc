@@ -8,7 +8,7 @@
 - Upstream author/license: Fimagena; GNU Lesser General Public License version 2.1. Copyright/license headers are retained in the source files. The full license is in `LGPL-2.1.txt`.
 - Purpose: PTP/IP packet/session transport and PTP data types used by the Sony Wi-Fi camera adapter.
 - Modifications in this app:
-  - `ptpip/TcpConnection.java`: added an overload accepting `java.net.SocketFactory` and used it to create the transport socket.
+  - `ptpip/TcpConnection.java`: added an overload accepting `javax.net.SocketFactory`, used it to create the transport socket, and capped socket connection attempts at 15 seconds.
   - `ptpip/PtpIpConnection.java`: added a constructor accepting a socket factory and forwarded it to both PTP/IP channels and any secondary session.
 - The remaining 12 files are unmodified from the cited commit.
 

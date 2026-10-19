@@ -311,9 +311,17 @@ class WedFacesApi(
         val failures = when (val raw = json.opt("failures")) {
             is JSONArray -> (0 until raw.length()).mapNotNull { index ->
                 raw.optJSONObject(index)?.let { item ->
-                    sequenceOf("fileName", "filename", "name", "error", "message")
-                        .mapNotNull { item.optString(it).takeIf(String::isNotBlank) }
-                        .firstOrNull()
+                        val fileName = sequenceOf("fileName", "filename", "name")
+                            .mapNotNull { item.optString(it).takeIf(String::isNotBlank) }
+                            .firstOrNull()
+                        val message = sequenceOf("error", "message")
+                            .mapNotNull { item.optString(it).takeIf(String::isNotBlank) }
+                            .firstOrNull()
+                        when {
+                            fileName != null && message != null -> "$fileName — $message"
+                            fileName != null -> fileName
+                            else -> message
+                        }
                 } ?: raw.optString(index).takeIf(String::isNotBlank)
             }
             else -> emptyList()
@@ -348,8 +356,9 @@ class WedFacesApi(
 
     private fun validateFormat(fileName: String, mimeType: String) {
         val extension = fileName.substringAfterLast('.', "").lowercase(Locale.ROOT)
-        val supported = extension in SUPPORTED_EXTENSIONS ||
-            mimeType.lowercase(Locale.ROOT) in SUPPORTED_MIME_TYPES
+        val supportedMime = SUPPORTED_MIME_TYPES[extension]
+        val supported = supportedMime != null &&
+            (mimeType.isBlank() || mimeType.lowercase(Locale.ROOT) == supportedMime)
         if (!supported) {
             throw WedFacesApiException(
                 415,
@@ -385,8 +394,12 @@ class WedFacesApi(
 
     private companion object {
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaTypeOrNull()
-        val SUPPORTED_EXTENSIONS = setOf("jpg", "jpeg", "png", "webp")
-        val SUPPORTED_MIME_TYPES = setOf("image/jpeg", "image/png", "image/webp")
+        val SUPPORTED_MIME_TYPES = mapOf(
+            "jpg" to "image/jpeg",
+            "jpeg" to "image/jpeg",
+            "png" to "image/png",
+            "webp" to "image/webp",
+        )
     }
 }
 

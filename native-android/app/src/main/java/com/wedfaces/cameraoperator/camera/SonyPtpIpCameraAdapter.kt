@@ -1,5 +1,7 @@
 package com.wedfaces.cameraoperator.camera
 
+import android.content.Context
+import android.net.ConnectivityManager
 import android.net.Network
 import com.fimagena.libptp.PtpConnection
 import com.fimagena.libptp.PtpDataType
@@ -22,11 +24,12 @@ import kotlinx.coroutines.withContext
  * GetObjectHandles, and GetObjectInfo. GetObject is invoked only by the
  * explicit selected-original transfer method.
  */
-class SonyPtpIpCameraAdapter : CameraGateway {
+class SonyPtpIpCameraAdapter(context: Context) : CameraGateway {
+    private val connectivityManager = context.applicationContext
+        .getSystemService(ConnectivityManager::class.java)
     private val operationMutex = Mutex()
     private var connection: PtpConnection? = null
     private var session: PtpSession? = null
-    private var cameraAddress: String? = null
 
     override suspend fun connect(network: Network, endpoint: String?): String =
         operationMutex.withLock {
@@ -49,7 +52,6 @@ class SonyPtpIpCameraAdapter : CameraGateway {
                     val openedSession = ptp.openSession()
                     connection = ptp
                     session = openedSession
-                    cameraAddress = address
                     ptp.deviceInfo?.mModel?.mString?.takeIf(String::isNotBlank) ?: "Sony camera"
                 } catch (error: Exception) {
                     closeCurrentConnection()
@@ -161,11 +163,10 @@ class SonyPtpIpCameraAdapter : CameraGateway {
         }
         session = null
         connection = null
-        cameraAddress = null
     }
 
     private fun defaultGatewayAddress(network: Network): String? =
-        network.getLinkPropertiesCompat()?.routes
+        connectivityManager.getLinkProperties(network)?.routes
             ?.firstOrNull { it.isDefaultRoute && it.gateway != null }
             ?.gateway
             ?.hostAddress
@@ -190,13 +191,3 @@ class SonyPtpIpCameraAdapter : CameraGateway {
         )
     }
 }
-
-private fun Network.getLinkPropertiesCompat() =
-    try {
-        val method = Network::class.java.getMethod("getAllByName", String::class.java)
-        // Keep this extension separate to avoid accidentally binding the app process.
-        method.isAccessible = false
-        null
-    } catch (_: Exception) {
-        null
-    }

@@ -33,6 +33,7 @@ enum class QueueState(val title: String) {
     UPLOADED_WAITING_IMPORT("Uploaded · waiting for import"),
     IMPORTED("Imported"),
     FAILED("Failed · retry available"),
+    IMPORT_REVIEW("Import result needs review"),
     UNSUPPORTED("Unsupported format"),
     CANCELLED("Cancelled"),
 }

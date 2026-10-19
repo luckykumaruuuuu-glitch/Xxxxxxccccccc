@@ -18,13 +18,21 @@ The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
 Open **Settings**, enter the existing WED Faces server base URL, and sign in with the WED Faces account. The app uses the documented login, refresh, album, upload, import, and import-status endpoints. It stores access and refresh tokens encrypted with an Android Keystore AES-GCM key; the password is not persisted.
 
+The implemented routes are:
+
+- `POST /api/auth/login` and `POST /api/auth/refresh`
+- `GET /api/albums` (the server album `id` is used for every album route)
+- `POST /api/albums/{albumId}/import/upload` as multipart form fields `uploadId` and `file`
+- `POST /api/albums/{albumId}/import` with `{"path":".device-uploads/{albumId}"}`
+- `GET /api/albums/{albumId}/import/status` for state, counts, and reported failures
+
 Remote servers must use HTTPS. The debug build permits cleartext networking at the Android platform layer so a developer can point to a local server, but the app itself rejects HTTP unless **Allow HTTP for local development** is explicitly enabled and the host is a local/private-network address. Release builds disallow cleartext traffic.
 
 The app does not include a WED Faces server URL, credentials, API secret, or test success response. The exact live album/status response shapes and the deployment's file-size limit must be confirmed against the target server. The documented upload formats are JPG/JPEG, PNG, and WEBP; an HTTP 413 response is shown as a server file-size limit.
 
 ## Camera connection
 
-The initial adapter is Sony Wi-Fi PTP/IP, using the PTP/IP implementation described by SonyPhotoTransfer. On the camera, start **Send to Smartphone**, then use **Connect Camera** and enter the camera access-point SSID/password shown by the camera. Android presents its Wi-Fi connection dialog. Camera PTP/IP sockets use the selected Android `Network` socket factory; server API sockets remain on the normal internet-capable network.
+The initial adapter is Sony Wi-Fi PTP/IP, using the PTP/IP implementation described by SonyPhotoTransfer. On the camera, start **Send to Smartphone**, then use **Connect to camera Wi-Fi** and enter the camera access-point SSID/password shown by the camera. Android presents its Wi-Fi connection dialog. Camera PTP/IP sockets use the selected Android `Network` socket factory; server API sockets remain on the normal internet-capable network. TCP connection attempts time out after 15 seconds.
 
 The app lists PTP object handles, metadata, and small camera thumbnails. It requests an original only after **Send Selected**. It never sends delete, rename, format, or write operations to the camera. Physical camera behavior remains unverified until tested with a real supported camera and firmware.
 
@@ -54,4 +62,4 @@ See `licenses/SOURCE_ATTRIBUTION.md` for exact source and modification details.
 
 ## Verification status
 
-The project includes unit tests for the documented API request contract and queue state behavior. Build/test outcomes and any unavailable live-server or physical-camera tests are reported separately in the final handoff.
+The project includes mock-server unit tests for the documented API routes, multipart fields, refresh flow, import status parsing, format rejection, and upload-size errors. Build/test outcomes and any unavailable live-server or physical-camera tests are reported in `TEST_REPORT.md`.
