@@ -41,7 +41,7 @@ Native Android application for browsing supported Sony camera images, choosing o
 
 ## Product
 
-The Android app has Camera, Queue, and Settings destinations. It supports Sony Wi-Fi PTP/IP browsing, selected-only original retrieval, persistent uploads/import status, secure WED Faces sign-in, and a clearly labeled test mode using actual Android-picked images.
+The Android app has Camera, Queue, and Settings destinations. It supports Sony Wi-Fi PTP/IP browsing, selected-only original retrieval, persistent uploads/import status, secure email/password WED Faces sign-in, a clearly labeled test mode using actual Android-picked images, and an optional Android Storage Access Framework phone-folder watcher. The watcher is not a camera adapter. USB/OTG, Canon, and Nikon are not supported.
 
 ## User preferences
 

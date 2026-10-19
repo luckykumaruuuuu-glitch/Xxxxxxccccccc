@@ -16,6 +16,7 @@ data class SettingsSnapshot(
     val folderWatchEnabled: Boolean,
     val includeExistingFolderFiles: Boolean,
     val folderWatchActivatedAtMillis: Long,
+    val folderWatchMessage: String?,
 )
 
 class SettingsRepository(context: Context) {
@@ -36,6 +37,7 @@ class SettingsRepository(context: Context) {
         folderWatchEnabled = preferences.getBoolean(KEY_FOLDER_WATCH_ENABLED, false),
         includeExistingFolderFiles = preferences.getBoolean(KEY_INCLUDE_EXISTING_FOLDER_FILES, false),
         folderWatchActivatedAtMillis = preferences.getLong(KEY_FOLDER_WATCH_ACTIVATED_AT, 0L),
+        folderWatchMessage = preferences.getString(KEY_FOLDER_WATCH_MESSAGE, null),
     )
 
     fun saveServerUrl(value: String) {
@@ -80,6 +82,7 @@ class SettingsRepository(context: Context) {
             .putBoolean(KEY_FOLDER_WATCH_ENABLED, enabled)
             .putBoolean(KEY_INCLUDE_EXISTING_FOLDER_FILES, includeExisting)
             .putLong(KEY_FOLDER_WATCH_ACTIVATED_AT, if (enabled) now else 0L)
+            .remove(KEY_FOLDER_WATCH_MESSAGE)
             .apply()
     }
 
@@ -87,7 +90,19 @@ class SettingsRepository(context: Context) {
         preferences.edit()
             .putBoolean(KEY_FOLDER_WATCH_ENABLED, enabled)
             .putLong(KEY_FOLDER_WATCH_ACTIVATED_AT, if (enabled) System.currentTimeMillis() else 0L)
+            .remove(KEY_FOLDER_WATCH_MESSAGE)
             .apply()
+    }
+
+    fun setIncludeExistingFolderFiles(enabled: Boolean) {
+        preferences.edit()
+            .putBoolean(KEY_INCLUDE_EXISTING_FOLDER_FILES, enabled)
+            .remove(KEY_FOLDER_WATCH_MESSAGE)
+            .apply()
+    }
+
+    fun setFolderWatchMessage(message: String?) {
+        preferences.edit().putString(KEY_FOLDER_WATCH_MESSAGE, message).apply()
     }
 
     private companion object {
@@ -104,5 +119,6 @@ class SettingsRepository(context: Context) {
         const val KEY_FOLDER_WATCH_ENABLED = "folder_watch_enabled"
         const val KEY_INCLUDE_EXISTING_FOLDER_FILES = "include_existing_folder_files"
         const val KEY_FOLDER_WATCH_ACTIVATED_AT = "folder_watch_activated_at"
+        const val KEY_FOLDER_WATCH_MESSAGE = "folder_watch_message"
     }
 }

@@ -28,3 +28,17 @@ mtime_ms = 1792386165603
 storage_uri = "gcs://replit-rams-assets-sisko/rams/assets/repl:5d2ef40d-0e33-4fd2-8458-b1a52a574133/46e3fcac-254d-4750-bbe5-c52677d56fce/ea721c08-7de4-4eae-82e1-782583cef1f4"
 storage_version_token = "1792386297594917"
 content_type = "application/octet-stream"
+
+[[outputs]]
+id = "u3vG73q8Pxp5uXJsfOx2i"
+uri = "file://generated-artifacts/WED-Faces-Camera-Operator-source-final.zip"
+type = "unspecified"
+title = "WED Faces Camera Operator — Android source ZIP"
+description = "Updated native Android source, including the phone-folder watcher, tests, setup notes, and current test report. Build caches, signing keys, and APKs are excluded."
+logical_id = "b4ad4a3e-c27d-4c7e-bf82-16b93c53ac39"
+content_hash = "sha256:1bc7ae7b03f28bb5453b438255a14900312aa7a6435490f978fc39aad97d6f4c"
+size = 165395
+mtime_ms = 1792395126515
+storage_uri = "gcs://replit-rams-assets-sisko/rams/assets/repl:c02d78ac-100d-409b-b4a2-6086449d6245/b4ad4a3e-c27d-4c7e-bf82-16b93c53ac39/873ba143-3ac2-4d79-a421-dcc8fe34b82f"
+storage_version_token = "1792395147041396"
+content_type = "application/octet-stream"

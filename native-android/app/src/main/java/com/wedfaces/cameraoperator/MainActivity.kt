@@ -131,6 +131,9 @@ private fun CameraOperatorRoot(viewModel: AppViewModel = viewModel()) {
     val imagePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickMultipleVisualMedia(50),
     ) { uris -> if (uris.isNotEmpty()) viewModel.showTestImages(uris) }
+    val phoneFolderPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree(),
+    ) { uri -> if (uri != null) viewModel.setFolderWatchFolder(uri) }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
@@ -250,6 +253,9 @@ private fun CameraOperatorRoot(viewModel: AppViewModel = viewModel()) {
                     onToggleTestMode = viewModel::setTestMode,
                     onToggleLocalHttp = viewModel::setLocalHttpAllowed,
                     onToggleKeepScreenOn = viewModel::setKeepScreenOn,
+                    onPickFolder = { phoneFolderPicker.launch(null) },
+                    onToggleFolderWatch = viewModel::setFolderWatchEnabled,
+                    onIncludeExistingFolderFiles = viewModel::setIncludeExistingFolderFiles,
                     onSelectAlbum = viewModel::selectAlbum,
                     onReloadAlbums = viewModel::refreshAlbums,
                     diagnostics = viewModel.diagnostics(),
@@ -665,6 +671,9 @@ private fun SettingsScreen(
     onToggleTestMode: (Boolean) -> Unit,
     onToggleLocalHttp: (Boolean) -> Unit,
     onToggleKeepScreenOn: (Boolean) -> Unit,
+    onPickFolder: () -> Unit,
+    onToggleFolderWatch: (Boolean) -> Unit,
+    onIncludeExistingFolderFiles: (Boolean) -> Unit,
     onSelectAlbum: (com.wedfaces.cameraoperator.model.Album) -> Unit,
     onReloadAlbums: () -> Unit,
     diagnostics: String,
@@ -742,6 +751,40 @@ private fun SettingsScreen(
                     }
                     Text("Album selection uses the server album ID required by the upload route.", fontSize = 11.sp, color = Color(0xFFBDBDBD))
                 }
+            }
+        }
+        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1A1A)), border = BorderStroke(1.dp, Line)) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                SectionTitle("Phone folder watch")
+                Text(
+                    if (state.folderWatchUri == null) "No phone folder selected."
+                    else "Folder access saved. New supported photos are copied into the transfer queue.",
+                    fontSize = 11.sp,
+                    color = Color(0xFFBDBDBD),
+                )
+                OutlinedButton(onClick = onPickFolder, modifier = Modifier.fillMaxWidth()) {
+                    Text(if (state.folderWatchUri == null) "Choose phone folder" else "Change phone folder")
+                }
+                SettingSwitch(
+                    title = "Include existing photos",
+                    detail = "When enabled, the next scan also queues supported photos already in the folder.",
+                    checked = state.includeExistingFolderFiles,
+                    onCheckedChange = onIncludeExistingFolderFiles,
+                )
+                SettingSwitch(
+                    title = "Watch this folder",
+                    detail = "Checks periodically; Android may delay scans to save battery.",
+                    checked = state.folderWatchEnabled,
+                    onCheckedChange = onToggleFolderWatch,
+                )
+                state.folderWatchMessage?.let {
+                    Text(it, fontSize = 11.sp, color = Color(0xFFBDBDBD))
+                }
+                Text(
+                    "Requires sign-in and a selected album. Only JPG, JPEG, PNG, and WEBP are queued. If Android does not report file dates, enable Include existing photos. Folder access can be revoked in Android settings.",
+                    fontSize = 10.sp,
+                    color = Color(0xFFBDBDBD),
+                )
             }
         }
         Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF1A1A1A)), border = BorderStroke(1.dp, Line)) {

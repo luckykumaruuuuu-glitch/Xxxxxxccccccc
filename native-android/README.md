@@ -31,6 +31,8 @@ Remote servers must use HTTPS. The debug build permits cleartext networking at t
 
 The app does not include a WED Faces server URL, credentials, API secret, or test success response. The exact live album/status response shapes and the deployment's file-size limit must be confirmed against the target server. The documented upload formats are JPG/JPEG, PNG, and WEBP; an HTTP 413 response is shown as a server file-size limit.
 
+Authentication currently uses the documented email/password route (`POST /api/auth/login`) and refresh route. No upload-key sign-in endpoint or request/response contract is present in the supplied API documentation, so the app does not invent one. Add that flow only after the WED Faces backend contract is supplied.
+
 ## Camera connection
 
 The initial adapter is Sony Wi-Fi PTP/IP, using the PTP/IP implementation described by SonyPhotoTransfer. On the camera, start **Send to Smartphone**, then use **Connect to camera Wi-Fi** and enter the camera access-point SSID/password shown by the camera. Android presents its Wi-Fi connection dialog. Camera PTP/IP sockets use the selected Android `Network` socket factory; server API sockets remain on the normal internet-capable network. TCP connection attempts time out after 15 seconds.
@@ -38,6 +40,12 @@ The initial adapter is Sony Wi-Fi PTP/IP, using the PTP/IP implementation descri
 The app lists PTP object handles, metadata, and small camera thumbnails. It requests an original only after **Send Selected**. It never sends delete, rename, format, or write operations to the camera. Physical camera behavior remains unverified until tested with a real supported camera and firmware.
 
 USB/OTG, Canon, and Nikon are not implemented. Do not treat the Android photo picker as a camera connection: it is available only under the separately labeled Test Mode.
+
+## Phone-folder watch
+
+In **Settings → Phone folder watch**, choose the phone folder that directly contains the images. Android's Storage Access Framework grants read-only folder access; the app does not request broad media-library permission. Enable **Watch this folder** after signing in and selecting the destination album. WorkManager scans about every 15 minutes (Android may defer background work for battery management), copies supported JPG/JPEG/PNG/WEBP files into app-private storage, and queues them through the same real upload/import flow. Original phone files are not modified or deleted.
+
+By default, only files whose modification time is newer than the moment watch was enabled are queued. If a document provider does not return modification times, those files are excluded unless **Include existing photos** is enabled. That option also opts into the next scan of the already-present files. A saved URI/modified-time/size identity prevents the same unchanged file from being queued again, including after clearing imported rows. Select the folder again if Android access is revoked. Folder watch is not a camera adapter and does not replace the Sony connection.
 
 ## Transfer queue
 
@@ -66,3 +74,5 @@ See `licenses/SOURCE_ATTRIBUTION.md` for exact source and modification details.
 ## Verification status
 
 The project includes mock-server unit tests for the documented API routes, multipart fields, refresh flow, import status parsing, format rejection, and upload-size errors, plus SQLite queue/import-status persistence coverage. Build/test outcomes and any unavailable live-server or physical-camera tests are reported in `TEST_REPORT.md`.
+
+Release APK signing is not configured with a project-owned keystore. Do not ship an unsigned release APK or reuse a debug key as a production signing key. Configure a user-controlled signing key outside the source package before distribution.

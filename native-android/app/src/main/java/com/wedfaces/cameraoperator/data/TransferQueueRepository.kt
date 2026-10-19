@@ -47,6 +47,7 @@ class TransferQueueRepository(
         createImportStatusTable(db)
         createSentCameraObjectsTable(db)
         createTransferBatchesTable(db)
+        createFolderWatchSeenTable(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -62,6 +63,9 @@ class TransferQueueRepository(
         }
         if (oldVersion < 5) {
             createTransferBatchesTable(db)
+        }
+        if (oldVersion < 6) {
+            createFolderWatchSeenTable(db)
         }
     }
 
@@ -185,6 +189,45 @@ class TransferQueueRepository(
     fun insert(item: TransferItem) {
         createBatchIfMissing(item.batchId, item.albumId, item.source != PhotoSource.CAMERA)
         writableDatabase.insertOrThrow(TABLE, null, item.toContentValues())
+    }
+
+    @Synchronized
+    fun hasFolderWatchSeen(sourceUri: String): Boolean =
+        readableDatabase.query(
+            FOLDER_WATCH_SEEN_TABLE,
+            arrayOf("source_uri"),
+            "source_uri = ?",
+            arrayOf(sourceUri),
+            null,
+            null,
+            null,
+            "1",
+        ).use { it.moveToFirst() }
+
+    @Synchronized
+    fun insertFolderWatchIfNew(item: TransferItem): Boolean {
+        require(item.source == PhotoSource.FOLDER_WATCH)
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val seenRow = db.insertWithOnConflict(
+                FOLDER_WATCH_SEEN_TABLE,
+                null,
+                ContentValues().apply {
+                    put("source_uri", item.sourceObjectId)
+                    put("transfer_id", item.id)
+                    put("first_seen_at", System.currentTimeMillis())
+                },
+                SQLiteDatabase.CONFLICT_IGNORE,
+            )
+            if (seenRow == -1L) return false
+            createBatchIfMissing(item.batchId, item.albumId, downloadComplete = true)
+            db.insertOrThrow(TABLE, null, item.toContentValues())
+            db.setTransactionSuccessful()
+            return true
+        } finally {
+            db.endTransaction()
+        }
     }
 
     @Synchronized
@@ -405,6 +448,18 @@ class TransferQueueRepository(
         )
     }
 
+    private fun createFolderWatchSeenTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS folder_watch_seen (
+              source_uri TEXT PRIMARY KEY NOT NULL,
+              transfer_id TEXT NOT NULL,
+              first_seen_at INTEGER NOT NULL
+            )
+            """.trimIndent(),
+        )
+    }
+
     private fun createBatchIfMissing(batchId: String, albumId: String, downloadComplete: Boolean) {
         val values = ContentValues().apply {
             put("batch_id", batchId)
@@ -459,11 +514,12 @@ class TransferQueueRepository(
 
     companion object {
         private const val DATABASE_NAME = "camera_operator_queue.db"
-        private const val DATABASE_VERSION = 5
+        private const val DATABASE_VERSION = 6
         private const val TABLE = "transfers"
         private const val STATUS_TABLE = "import_status"
         private const val SENT_TABLE = "sent_camera_objects"
         private const val BATCH_TABLE = "transfer_batches"
+        private const val FOLDER_WATCH_SEEN_TABLE = "folder_watch_seen"
 
         fun newTransfer(
             batchId: String,

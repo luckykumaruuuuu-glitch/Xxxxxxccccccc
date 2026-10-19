@@ -9,6 +9,8 @@ import com.wedfaces.cameraoperator.model.ImportFileResult
 import com.wedfaces.cameraoperator.model.PhotoSource
 import com.wedfaces.cameraoperator.model.QueueState
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -63,6 +65,43 @@ class TransferQueueRepositoryTest {
         } finally {
             repository.close()
             context.deleteDatabase(DATABASE_NAME)
+        }
+    }
+
+    @Test
+    fun folderWatchSourceIsQueuedOnlyOnceAndSeenMarkerSurvivesReopen() {
+        val context = RuntimeEnvironment.getApplication()
+        val databaseName = "camera_operator_folder_watch_test.db"
+        context.deleteDatabase(databaseName)
+        var repository = TransferQueueRepository(context, databaseName)
+        val identity = "content://phone-folder/photo-1|1720000000000|2048"
+        val first = TransferQueueRepository.newTransfer(
+            batchId = "folder-batch-one",
+            albumId = "album-id",
+            albumName = "Wedding",
+            source = PhotoSource.FOLDER_WATCH,
+            sourceObjectId = identity,
+            fileName = "photo.jpg",
+            mimeType = "image/jpeg",
+            sizeBytes = 2048L,
+            initialState = QueueState.READY_TO_UPLOAD,
+        )
+        try {
+            assertTrue(repository.insertFolderWatchIfNew(first))
+            repository.close()
+
+            repository = TransferQueueRepository(context, databaseName)
+            assertTrue(repository.hasFolderWatchSeen(identity))
+            val duplicate = first.copy(
+                id = "duplicate-transfer",
+                uploadId = "duplicate-upload",
+                batchId = "folder-batch-two",
+            )
+            assertFalse(repository.insertFolderWatchIfNew(duplicate))
+            assertEquals(1, repository.getAll().size)
+        } finally {
+            repository.close()
+            context.deleteDatabase(databaseName)
         }
     }
 

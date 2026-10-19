@@ -47,6 +47,10 @@ data class AppUiState(
     val cameraNetworkMessage: String? = null,
     val cameraBusy: Boolean = false,
     val keepScreenOn: Boolean = false,
+    val folderWatchUri: String? = null,
+    val folderWatchEnabled: Boolean = false,
+    val includeExistingFolderFiles: Boolean = false,
+    val folderWatchMessage: String? = null,
     val cameraPhotoLimit: String = "50",
     val onlyNewSinceLastSend: Boolean = false,
     val unsupportedCameraCount: Int = 0,
@@ -92,6 +96,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             testMode = settings.testMode,
             allowLocalHttp = settings.allowLocalHttp,
             keepScreenOn = settings.keepScreenOn,
+            folderWatchUri = settings.folderWatchUri,
+            folderWatchEnabled = settings.folderWatchEnabled,
+            includeExistingFolderFiles = settings.includeExistingFolderFiles,
+            folderWatchMessage = settings.folderWatchMessage,
             cameraPhotoLimit = settings.cameraPhotoLimit,
             onlyNewSinceLastSend = settings.onlyNewSinceLastSend,
             signedIn = services.tokens.accessToken() != null,
@@ -103,7 +111,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             while (true) {
                 delay(1_500)
                 val queue = services.queue.getAll()
-                _state.value = _state.value.copy(queue = queue, importStatuses = loadImportStatuses(queue))
+                val latestSettings = services.settings.snapshot()
+                _state.value = _state.value.copy(
+                    queue = queue,
+                    importStatuses = loadImportStatuses(queue),
+                    folderWatchUri = latestSettings.folderWatchUri,
+                    folderWatchEnabled = latestSettings.folderWatchEnabled,
+                    includeExistingFolderFiles = latestSettings.includeExistingFolderFiles,
+                    folderWatchMessage = latestSettings.folderWatchMessage,
+                )
             }
         }
     }
@@ -148,6 +164,60 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun setKeepScreenOn(enabled: Boolean) {
         services.settings.setKeepScreenOn(enabled)
         _state.value = _state.value.copy(keepScreenOn = enabled)
+    }
+
+    fun setFolderWatchFolder(uri: Uri) {
+        try {
+            getApplication<Application>().contentResolver.takePersistableUriPermission(
+                uri,
+                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
+            )
+            val current = services.settings.snapshot()
+            services.settings.setFolderWatch(uri.toString(), false, current.includeExistingFolderFiles)
+            services.cancelFolderWatch()
+            _state.value = _state.value.copy(
+                folderWatchUri = uri.toString(),
+                folderWatchEnabled = false,
+                folderWatchMessage = null,
+                message = "Phone folder saved. Enable watching to queue new photos.",
+                error = null,
+            )
+        } catch (error: Exception) {
+            _state.value = _state.value.copy(
+                error = "Android could not save access to that folder: ${error.message ?: "permission denied."}",
+            )
+        }
+    }
+
+    fun setFolderWatchEnabled(enabled: Boolean) {
+        val current = _state.value
+        if (enabled && current.folderWatchUri.isNullOrBlank()) {
+            _state.value = current.copy(error = "Choose a phone folder before enabling folder watch.")
+            return
+        }
+        if (enabled && (!current.signedIn || current.selectedAlbumId.isNullOrBlank())) {
+            _state.value = current.copy(error = "Sign in and select an album before enabling folder watch.")
+            return
+        }
+        services.settings.setFolderWatchEnabled(enabled)
+        if (enabled) services.scheduleFolderWatch() else services.cancelFolderWatch()
+        val latest = services.settings.snapshot()
+        _state.value = current.copy(
+            folderWatchEnabled = enabled,
+            folderWatchMessage = latest.folderWatchMessage,
+            message = if (enabled) {
+                "Phone folder watch is on. New supported photos are checked about every 15 minutes."
+            } else {
+                "Phone folder watch is paused."
+            },
+            error = null,
+        )
+    }
+
+    fun setIncludeExistingFolderFiles(enabled: Boolean) {
+        services.settings.setIncludeExistingFolderFiles(enabled)
+        _state.value = _state.value.copy(includeExistingFolderFiles = enabled, error = null)
+        if (_state.value.folderWatchEnabled) services.scheduleFolderWatchScan()
     }
 
     fun setCameraPhotoLimit(value: String) {
@@ -604,6 +674,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             appendLine("Signed in: ${current.signedIn}")
             appendLine("Album selected: ${current.selectedAlbumName ?: "(none)"}")
             appendLine("Test Mode: ${current.testMode}")
+            appendLine("Phone folder watch: ${current.folderWatchEnabled}")
             appendLine("Camera connected: ${current.cameraConnected}")
             appendLine("Queue:")
             append(queueCounts.ifBlank { "(empty)" })

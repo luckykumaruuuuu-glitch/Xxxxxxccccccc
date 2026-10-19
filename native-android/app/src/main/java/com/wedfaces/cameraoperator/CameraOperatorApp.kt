@@ -9,6 +9,7 @@ import androidx.work.WorkManager
 import androidx.work.workDataOf
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkInfo
 import com.wedfaces.cameraoperator.camera.CameraNetworkController
 import com.wedfaces.cameraoperator.camera.SonyPtpIpCameraAdapter
 import com.wedfaces.cameraoperator.data.AndroidTokenStore
@@ -26,6 +27,7 @@ class CameraOperatorApp : Application() {
         super.onCreate()
         services = AppServices(this)
         TransferNotifications.createChannel(this)
+        if (services.settings.snapshot().folderWatchEnabled) services.scheduleFolderWatch()
     }
 
     internal fun replaceServicesForTest(testServices: AppServices) {
@@ -60,6 +62,12 @@ class AppServices(
             ExistingWorkPolicy.APPEND_OR_REPLACE,
             transferRequest(batchId).build(),
         )
+    }
+
+    fun enqueueBatchIfInactive(batchId: String) {
+        val activeStates = setOf(WorkInfo.State.ENQUEUED, WorkInfo.State.RUNNING, WorkInfo.State.BLOCKED)
+        val infos = workManager.getWorkInfosForUniqueWork(workName(batchId)).get()
+        if (infos.none { it.state in activeStates }) enqueueBatch(batchId)
     }
 
     fun startCameraDownload(batchId: String) {
@@ -108,5 +116,33 @@ class AppServices(
         workManager.cancelUniqueWork(workName(batchId))
         queue.cancelBatchItems(batchId)
         appContext.stopService(android.content.Intent(appContext, CameraDownloadService::class.java))
+    }
+
+    fun scheduleFolderWatch() {
+        val periodic = PeriodicWorkRequestBuilder<FolderWatchWorker>(15, TimeUnit.MINUTES).build()
+        workManager.enqueueUniquePeriodicWork(
+            FOLDER_WATCH_PERIODIC_NAME,
+            ExistingPeriodicWorkPolicy.UPDATE,
+            periodic,
+        )
+        scheduleFolderWatchScan()
+    }
+
+    fun scheduleFolderWatchScan() {
+        workManager.enqueueUniqueWork(
+            FOLDER_WATCH_SCAN_NAME,
+            ExistingWorkPolicy.KEEP,
+            OneTimeWorkRequestBuilder<FolderWatchWorker>().build(),
+        )
+    }
+
+    fun cancelFolderWatch() {
+        workManager.cancelUniqueWork(FOLDER_WATCH_SCAN_NAME)
+        workManager.cancelUniquePeriodicWork(FOLDER_WATCH_PERIODIC_NAME)
+    }
+
+    companion object {
+        private const val FOLDER_WATCH_PERIODIC_NAME = "wedfaces-phone-folder-watch"
+        private const val FOLDER_WATCH_SCAN_NAME = "wedfaces-phone-folder-watch-scan"
     }
 }
