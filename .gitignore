@@ -57,3 +57,4 @@ native-android/app/build/
 native-android/*.apk
 native-android/*.aab
 native-android/source-package/
+/generated-artifacts/

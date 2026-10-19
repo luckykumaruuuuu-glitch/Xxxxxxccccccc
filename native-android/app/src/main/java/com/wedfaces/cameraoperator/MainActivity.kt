@@ -91,10 +91,10 @@ import com.wedfaces.cameraoperator.model.PhotoSource
 import com.wedfaces.cameraoperator.model.QueueState
 import com.wedfaces.cameraoperator.model.TransferItem
 
-private val Ink = Color(0xFF111111)
-private val Paper = Color(0xFFF7F7F5)
-private val Muted = Color(0xFF707070)
-private val Line = Color(0xFFE4E4E0)
+private val Ink = Color(0xFF000000)
+private val Paper = Color(0xFFFFFFFF)
+private val Muted = Color(0xFF757575)
+private val Line = Color(0xFFD6D6D6)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -110,7 +110,7 @@ class MainActivity : ComponentActivity() {
                     background = Ink,
                     onBackground = Color.White,
                     outline = Color(0xFF494949),
-                    error = Color(0xFFFF8A80),
+                    error = Color(0xFFBDBDBD),
                 ),
             ) {
                 CameraOperatorRoot()
@@ -258,7 +258,7 @@ private fun Header(state: AppUiState) {
             )
         } else {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(7.dp).clip(CircleShape).background(if (state.cameraConnected) Color(0xFF9DE2B0) else Color(0xFF777777)))
+                Box(Modifier.size(7.dp).clip(CircleShape).background(if (state.cameraConnected) Color.White else Color(0xFF777777)))
                 Spacer(Modifier.width(6.dp))
                 Text(if (state.cameraConnected) "CAMERA" else "OFFLINE", fontSize = 10.sp, color = Color(0xFFBDBDBD), letterSpacing = 1.sp)
             }
@@ -504,10 +504,10 @@ private fun ImportStatusSummary(status: com.wedfaces.cameraoperator.model.Import
             color = Color(0xFFBDBDBD),
         )
         status.error?.takeIf(String::isNotBlank)?.let {
-            Text(it, fontSize = 10.sp, color = Color(0xFFFF8A80))
+            Text(it, fontSize = 10.sp, color = Color(0xFFBDBDBD))
         }
-        status.failures.take(3).forEach { failure ->
-            Text(failure, fontSize = 10.sp, color = Color(0xFFFF8A80))
+        status.failures.forEach { failure ->
+            Text(failure, fontSize = 10.sp, color = Color(0xFFBDBDBD))
         }
     }
 }
@@ -524,7 +524,7 @@ private fun QueueItemRow(item: TransferItem) {
                     else -> Icons.Default.CloudUpload
                 },
                 null,
-                tint = if (item.state == QueueState.IMPORTED) Color(0xFF9DE2B0) else Color(0xFFBDBDBD),
+                tint = Color(0xFFBDBDBD),
                 modifier = Modifier.size(17.dp),
             )
             Spacer(Modifier.width(7.dp))
@@ -537,7 +537,7 @@ private fun QueueItemRow(item: TransferItem) {
             }
         }
         item.lastError?.takeIf(String::isNotBlank)?.let {
-            Text(it, color = Color(0xFFFF8A80), fontSize = 10.sp, modifier = Modifier.padding(start = 24.dp, top = 3.dp))
+            Text(it, color = Color(0xFFBDBDBD), fontSize = 10.sp, modifier = Modifier.padding(start = 24.dp, top = 3.dp))
         }
     }
 }
@@ -707,7 +707,7 @@ private fun EmptyState(title: String, detail: String) {
 private fun Notice(text: String, isError: Boolean) {
     Text(
         text = text,
-        color = if (isError) Color(0xFFFF8A80) else Color(0xFFE0E0E0),
+        color = if (isError) Color.White else Color(0xFFBDBDBD),
         fontSize = 12.sp,
         modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp),
     )
@@ -716,5 +716,5 @@ private fun Notice(text: String, isError: Boolean) {
 private fun formatBytes(value: Long): String = when {
     value < 1024 -> "$value B"
     value < 1024 * 1024 -> "${value / 1024} KB"
-    else -> String.format("%.1f MB", value.toDouble() / (1024 * 1024))
+    else -> String.format(java.util.Locale.ROOT, "%.1f MB", value.toDouble() / (1024 * 1024))
 }

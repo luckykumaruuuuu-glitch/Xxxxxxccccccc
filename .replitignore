@@ -8,3 +8,4 @@ native-android/.kotlin
 native-android/build
 native-android/app/build
 native-android/source-package
+generated-artifacts

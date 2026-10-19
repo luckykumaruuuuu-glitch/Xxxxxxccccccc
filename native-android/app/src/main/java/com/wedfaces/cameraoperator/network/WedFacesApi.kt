@@ -59,7 +59,7 @@ class WedFacesApi(
         client.newCall(request).execute().use { response ->
             val body = readBody(response)
             ensureSuccess(response, body)
-            val json = body.asJsonObject()
+            val json = body.toJsonValue().asJsonObject()
             val access = json.optString("accessToken").takeIf(String::isNotBlank)
                 ?: throw WedFacesApiException(response.code, "The server did not return an access token.", false)
             val refresh = json.optString("refreshToken").takeIf(String::isNotBlank)
@@ -190,7 +190,7 @@ class WedFacesApi(
             client.newCall(request).execute().use { response ->
                 val body = readBody(response)
                 if (!response.isSuccessful) return null
-                val json = body.asJsonObject()
+                val json = body.toJsonValue().asJsonObject()
                 val newAccess = json.optString("accessToken").takeIf(String::isNotBlank) ?: return null
                 val newRefresh = json.optString("refreshToken").takeIf(String::isNotBlank) ?: refreshToken
                 tokenStore.save(newAccess, newRefresh)

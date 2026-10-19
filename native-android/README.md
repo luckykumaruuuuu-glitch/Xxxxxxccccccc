@@ -10,6 +10,7 @@ Native Android source project for photographers who need to browse a supported S
 ```sh
 ./gradlew :app:assembleDebug
 ./gradlew :app:testDebugUnitTest
+./gradlew :app:lintDebug
 ```
 
 The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
@@ -62,4 +63,4 @@ See `licenses/SOURCE_ATTRIBUTION.md` for exact source and modification details.
 
 ## Verification status
 
-The project includes mock-server unit tests for the documented API routes, multipart fields, refresh flow, import status parsing, format rejection, and upload-size errors. Build/test outcomes and any unavailable live-server or physical-camera tests are reported in `TEST_REPORT.md`.
+The project includes mock-server unit tests for the documented API routes, multipart fields, refresh flow, import status parsing, format rejection, and upload-size errors, plus SQLite queue/import-status persistence coverage. Build/test outcomes and any unavailable live-server or physical-camera tests are reported in `TEST_REPORT.md`.

@@ -16,6 +16,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.json.JSONObject
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28], application = Application::class)
@@ -104,8 +105,7 @@ class WedFacesApiTest {
         assertEquals("POST", request.method)
         assertEquals("/api/albums/server-album-id/import", request.path)
         val body = request.body.readUtf8()
-        assertTrue(body.contains("\"path\""))
-        assertTrue(body.contains(".device-uploads/server-album-id"))
+        assertEquals(".device-uploads/server-album-id", JSONObject(body).optString("path"))
     }
 
     @Test
