@@ -129,6 +129,49 @@ class WedFacesApiTest {
     }
 
     @Test
+    fun importStatusParsesPerFileResultsForNewServers() = runBlocking {
+        tokens.save("access-token", "refresh-token")
+        server.enqueue(
+            MockResponse().setBody(
+                """{"state":"COMPLETED","results":[{"uploadId":"upload-1","fileName":"one.jpg","status":"imported"},{"fileName":"two.jpg","status":"failed","error":"invalid image"}]}""",
+            ),
+        )
+
+        val status = api.getAlbumImportStatus("server-album-id")
+
+        assertEquals(true, status.results?.get(0)?.success)
+        assertEquals("upload-1", status.results?.get(0)?.uploadId)
+        assertEquals(false, status.results?.get(1)?.success)
+        assertEquals("invalid image", status.results?.get(1)?.error)
+    }
+
+    @Test
+    fun retryAfterSecondsAreExposedFor429Responses() = runBlocking {
+        tokens.save("access-token", "refresh-token")
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(429)
+                .setHeader("Retry-After", "2")
+                .setBody("""{"error":"rate limited"}"""),
+        )
+        val image = File.createTempFile("wedfaces-retry-after-", ".jpg").apply {
+            writeBytes(byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0x01))
+        }
+
+        try {
+            val error = runCatching {
+                api.uploadSelectedPhoto("album-1", "upload-id", image, "image/jpeg")
+            }.exceptionOrNull() as WedFacesApiException
+
+            assertEquals(429, error.statusCode)
+            assertEquals(2_000L, error.retryAfterMillis)
+            assertTrue(error.retryable)
+        } finally {
+            image.delete()
+        }
+    }
+
+    @Test
     fun unauthorizedRequestRefreshesThenRetriesWithNewAccessToken() = runBlocking {
         tokens.save("expired-access", "refresh-token")
         server.enqueue(MockResponse().setResponseCode(401).setBody("""{"error":"expired"}"""))

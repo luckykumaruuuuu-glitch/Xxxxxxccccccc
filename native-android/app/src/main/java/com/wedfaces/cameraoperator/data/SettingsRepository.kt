@@ -9,6 +9,7 @@ data class SettingsSnapshot(
     val selectedAlbumName: String?,
     val testMode: Boolean,
     val allowLocalHttp: Boolean,
+    val keepScreenOn: Boolean,
 )
 
 class SettingsRepository(context: Context) {
@@ -22,6 +23,7 @@ class SettingsRepository(context: Context) {
         selectedAlbumName = preferences.getString(KEY_ALBUM_NAME, null),
         testMode = preferences.getBoolean(KEY_TEST_MODE, false),
         allowLocalHttp = preferences.getBoolean(KEY_ALLOW_LOCAL_HTTP, false),
+        keepScreenOn = preferences.getBoolean(KEY_KEEP_SCREEN_ON, false),
     )
 
     fun saveServerUrl(value: String) {
@@ -47,6 +49,10 @@ class SettingsRepository(context: Context) {
         preferences.edit().putBoolean(KEY_ALLOW_LOCAL_HTTP, enabled).apply()
     }
 
+    fun setKeepScreenOn(enabled: Boolean) {
+        preferences.edit().putBoolean(KEY_KEEP_SCREEN_ON, enabled).apply()
+    }
+
     private companion object {
         const val KEY_SERVER_URL = "server_url"
         const val KEY_EMAIL = "email"
@@ -54,5 +60,6 @@ class SettingsRepository(context: Context) {
         const val KEY_ALBUM_NAME = "album_name"
         const val KEY_TEST_MODE = "test_mode"
         const val KEY_ALLOW_LOCAL_HTTP = "allow_local_http"
+        const val KEY_KEEP_SCREEN_ON = "keep_screen_on"
     }
 }

@@ -457,7 +457,8 @@ private fun QueueScreen(
                     val retryable = batch.any {
                         it.state == QueueState.FAILED ||
                             it.state == QueueState.WAITING_FOR_INTERNET ||
-                            it.state == QueueState.IMPORT_REVIEW
+                            it.state == QueueState.IMPORT_REVIEW ||
+                            it.state == QueueState.AUTH_REQUIRED
                     }
                     val cancellable = batch.any { it.state != QueueState.IMPORTED && it.state != QueueState.CANCELLED }
                     Card(
@@ -472,7 +473,7 @@ private fun QueueScreen(
                                 Text("${batch.count { it.state == QueueState.IMPORTED }}/${batch.size}", color = Color(0xFFBDBDBD), fontSize = 12.sp)
                             }
                             state.importStatuses[batchId]?.let { status ->
-                                ImportStatusSummary(status)
+                                ImportStatusSummary(status, batch)
                             }
                             batch.forEach { item ->
                                 QueueItemRow(item)
@@ -490,7 +491,7 @@ private fun QueueScreen(
 }
 
 @Composable
-private fun ImportStatusSummary(status: com.wedfaces.cameraoperator.model.ImportStatus) {
+private fun ImportStatusSummary(status: com.wedfaces.cameraoperator.model.ImportStatus, batch: List<TransferItem>) {
     val counts = listOfNotNull(
         status.total?.let { "Total $it" },
         status.imported?.let { "Imported $it" },
@@ -509,6 +510,18 @@ private fun ImportStatusSummary(status: com.wedfaces.cameraoperator.model.Import
         status.failures.forEach { failure ->
             Text(failure, fontSize = 10.sp, color = Color(0xFFBDBDBD))
         }
+        val matchedFailures = status.failures.count { failure ->
+            batch.any { failure.contains(it.fileName, ignoreCase = true) }
+        }
+        val otherFailures = maxOf(
+            status.failures.count { failure ->
+                batch.none { failure.contains(it.fileName, ignoreCase = true) }
+            },
+            ((status.failed ?: 0).coerceAtLeast(status.failures.size) - matchedFailures).coerceAtLeast(0),
+        )
+        if (otherFailures > 0) {
+            Text("$otherFailures other failures on the server", fontSize = 10.sp, color = Color(0xFFBDBDBD))
+        }
     }
 }
 
@@ -519,7 +532,7 @@ private fun QueueItemRow(item: TransferItem) {
             Icon(
                 when (item.state) {
                     QueueState.IMPORTED -> Icons.Default.Check
-                    QueueState.FAILED, QueueState.IMPORT_REVIEW -> Icons.Default.Refresh
+                    QueueState.FAILED, QueueState.IMPORT_REVIEW, QueueState.AUTH_REQUIRED -> Icons.Default.Refresh
                     QueueState.CANCELLED -> Icons.Default.DeleteOutline
                     else -> Icons.Default.CloudUpload
                 },

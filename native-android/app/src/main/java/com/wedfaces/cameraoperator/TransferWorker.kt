@@ -3,11 +3,20 @@ package com.wedfaces.cameraoperator
 import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import com.wedfaces.cameraoperator.model.ImportStatus
 import com.wedfaces.cameraoperator.model.QueueState
+import com.wedfaces.cameraoperator.model.TransferItem
 import com.wedfaces.cameraoperator.network.WedFacesApiException
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 class TransferWorker(
     context: Context,
@@ -17,190 +26,290 @@ class TransferWorker(
 
     override suspend fun doWork(): Result {
         val batchId = inputData.getString(KEY_BATCH_ID) ?: return Result.failure()
-        val items = services.queue.getBatch(batchId)
-        if (items.isEmpty()) return Result.success()
+        val initialItems = services.queue.getBatch(batchId)
+        if (initialItems.isEmpty()) return Result.success()
 
-        try {
-            for (item in items) {
-                if (isStopped) return Result.success()
-                val current = services.queue.getBatch(batchId).firstOrNull { it.id == item.id } ?: continue
-                if (current.state == QueueState.IMPORTED ||
-                    current.state == QueueState.CANCELLED ||
-                    current.state == QueueState.UPLOADED_WAITING_IMPORT
-                ) continue
-                val localFile = current.temporaryFilePath?.let(::File)
-                if (localFile == null || !localFile.isFile || localFile.length() == 0L) {
-                    services.queue.update(
-                        current.id,
-                        QueueState.FAILED,
-                        lastError = "The local original is missing. Reconnect the camera or reselect this image.",
-                    )
-                    continue
-                }
-                services.queue.update(current.id, QueueState.UPLOADING, progressBytes = 0, attempts = current.attempts + 1)
-                services.api.uploadSelectedPhoto(
-                    albumId = current.albumId,
-                    uploadId = current.uploadId,
-                    file = localFile,
-                    mimeType = current.mimeType,
-                ) { sent, _ ->
-                    services.queue.update(current.id, QueueState.UPLOADING, progressBytes = sent)
-                }
-                services.queue.update(
-                    current.id,
-                    QueueState.UPLOADED_WAITING_IMPORT,
-                    progressBytes = localFile.length(),
-                )
+        val semaphore = Semaphore(MAX_PARALLEL_UPLOADS)
+        val outcomes = try {
+            coroutineScope {
+                initialItems
+                    .filter { it.state == QueueState.READY_TO_UPLOAD || it.state == QueueState.WAITING_FOR_INTERNET }
+                    .map { item ->
+                        async {
+                            semaphore.withPermit {
+                                if (isStopped) UploadOutcome() else uploadOne(item)
+                            }
+                        }
+                    }
+                    .awaitAll()
             }
-        } catch (error: WedFacesApiException) {
-            val currentItems = services.queue.getBatch(batchId)
-            currentItems.filter { it.state == QueueState.UPLOADING }.forEach { item ->
-                if (error.retryable) {
-                    services.queue.update(item.id, QueueState.WAITING_FOR_INTERNET, lastError = error.message)
-                } else {
-                    services.queue.update(item.id, QueueState.FAILED, lastError = error.message)
-                }
-            }
-            return if (error.retryable) Result.retry() else Result.failure()
-        } catch (error: IOException) {
-            services.queue.getBatch(batchId)
-                .filter { it.state == QueueState.UPLOADING }
-                .forEach { services.queue.update(it.id, QueueState.WAITING_FOR_INTERNET, lastError = error.message ?: "Network request failed.") }
-            return Result.retry()
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: Exception) {
             services.queue.getBatch(batchId)
-                .filter { it.state == QueueState.UPLOADING || it.state == QueueState.DOWNLOADING }
-                .forEach { services.queue.update(it.id, QueueState.FAILED, lastError = error.message ?: "Transfer failed.") }
+                .filter { it.state == QueueState.UPLOADING }
+                .forEach {
+                    services.queue.update(
+                        it.id,
+                        QueueState.FAILED,
+                        lastError = error.message ?: "Transfer failed unexpectedly.",
+                    )
+                }
             return Result.failure()
         }
 
-        val remaining = services.queue.getBatch(batchId).filter { it.state != QueueState.IMPORTED && it.state != QueueState.CANCELLED }
-        if (remaining.isEmpty()) return Result.success()
-        if (remaining.any { it.state == QueueState.FAILED }) return Result.failure()
-        if (remaining.any { it.state != QueueState.UPLOADED_WAITING_IMPORT }) return Result.retry()
+        if (outcomes.any { it.authenticationRequired }) {
+            services.queue.pauseBatchForAuthentication(
+                batchId,
+                "Sign in again to WED Faces. Files remain saved on this device.",
+            )
+            return Result.failure()
+        }
+
+        val retryDelay = outcomes.maxOfOrNull { it.retryDelayMillis } ?: 0L
+        if (retryDelay > 0L) {
+            services.scheduleBatchRetry(batchId, retryDelay)
+            return Result.success()
+        }
+
+        var uploaded = services.queue.getBatch(batchId)
+            .filter { it.state == QueueState.UPLOADED_WAITING_IMPORT }
+        if (uploaded.isEmpty()) return Result.success()
 
         try {
-            val albumId = remaining.first().albumId
+            val albumId = uploaded.first().albumId
             var status = services.api.getAlbumImportStatus(albumId)
             services.queue.saveImportStatus(batchId, status)
-            val importAlreadyStarted = remaining.any { it.importStarted }
+
+            val importAlreadyStarted = uploaded.any { it.importStarted }
             if (!importAlreadyStarted) {
                 if (status.state == "RUNNING") {
-                    for (attempt in 0 until 24) {
-                        if (status.state != "RUNNING") break
-                        delay(5_000)
-                        status = services.api.getAlbumImportStatus(albumId)
-                        services.queue.saveImportStatus(batchId, status)
-                    }
-                }
-                if (status.state == "RUNNING") return Result.retry()
-                services.api.startAlbumImport(albumId)
-                services.queue.updateBatch(batchId, QueueState.UPLOADED_WAITING_IMPORT, importStarted = true)
-                // Avoid mistaking a previous completed album import for this newly started batch.
-                delay(1_500)
-                status = services.api.getAlbumImportStatus(albumId)
-                services.queue.saveImportStatus(batchId, status)
-            } else {
-                when (status.state) {
-                    "COMPLETED" -> {
-                        finishImported(batchId, status)
+                    status = waitForImportStatus(batchId, albumId, status)
+                    if (status.state == "RUNNING") {
+                        scheduleImportRetry(batchId)
                         return Result.success()
                     }
-                    "FAILED" -> {
-                        val message = status.error ?: status.failures.firstOrNull() ?: "WED Faces import failed."
-                        services.queue.updateBatch(batchId, QueueState.FAILED, error = message)
-                        return Result.failure()
+                }
+                if (status.state != "RUNNING") {
+                    services.api.startAlbumImport(albumId)
+                    uploaded.forEach {
+                        services.queue.update(
+                            it.id,
+                            QueueState.UPLOADED_WAITING_IMPORT,
+                            importStarted = true,
+                        )
                     }
-                    "NONE" -> {
-                        services.api.startAlbumImport(albumId)
-                        services.queue.updateBatch(batchId, QueueState.UPLOADED_WAITING_IMPORT, importStarted = true)
-                    }
-                    "RUNNING" -> Unit
-                    else -> return Result.retry()
+                    // Let the server publish this run's status rather than reusing an older COMPLETED response.
+                    delay(1_500)
+                    status = services.api.getAlbumImportStatus(albumId)
+                    services.queue.saveImportStatus(batchId, status)
                 }
             }
 
-            if (status.state == "COMPLETED") {
-                finishImported(batchId, status)
+            if (status.state == "COMPLETED" || status.state == "FAILED") {
+                finishImport(batchId, status)
                 return Result.success()
             }
-            if (status.state == "FAILED") {
-                val message = status.error ?: status.failures.firstOrNull() ?: "WED Faces import failed."
-                services.queue.updateBatch(batchId, QueueState.FAILED, error = message)
-                return Result.failure()
-            }
             if (status.state == "NONE") {
-                // The server may briefly report NONE while the import worker starts.
                 delay(2_000)
                 status = services.api.getAlbumImportStatus(albumId)
                 services.queue.saveImportStatus(batchId, status)
-                if (status.state == "NONE") return Result.retry()
-            }
-
-            repeat(24) {
-                if (isStopped) return Result.success()
-                delay(5_000)
-                status = services.api.getAlbumImportStatus(albumId)
-                services.queue.saveImportStatus(batchId, status)
-                when (status.state) {
-                    "COMPLETED" -> {
-                        finishImported(batchId, status)
-                        return Result.success()
-                    }
-                    "FAILED" -> {
-                        val message = status.error ?: status.failures.firstOrNull() ?: "WED Faces import failed."
-                        services.queue.updateBatch(batchId, QueueState.FAILED, error = message)
-                        return Result.failure()
-                    }
+                if (status.state == "NONE") {
+                    scheduleImportRetry(batchId)
+                    return Result.success()
+                }
+                if (status.state == "COMPLETED" || status.state == "FAILED") {
+                    finishImport(batchId, status)
+                    return Result.success()
                 }
             }
-            return Result.retry()
+
+            status = waitForImportStatus(batchId, albumId, status)
+            if (status.state == "COMPLETED" || status.state == "FAILED") {
+                finishImport(batchId, status)
+                return Result.success()
+            }
+            scheduleImportRetry(batchId)
+            return Result.success()
+        } catch (error: CancellationException) {
+            throw error
         } catch (error: WedFacesApiException) {
-            services.queue.updateBatch(
-                batchId,
-                if (error.retryable) QueueState.UPLOADED_WAITING_IMPORT else QueueState.FAILED,
-                error.message,
-            )
-            return if (error.retryable) Result.retry() else Result.failure()
+            if (error.statusCode == 401) {
+                services.queue.pauseBatchForAuthentication(
+                    batchId,
+                    "Sign in again to WED Faces. Files remain saved on this device.",
+                )
+                return Result.failure()
+            }
+            if (error.retryable) {
+                services.scheduleBatchRetry(
+                    batchId,
+                    maxOf(error.retryAfterMillis ?: 0L, exponentialBackoffMillis(runAttemptCount + 1)),
+                )
+                return Result.success()
+            }
+            markImportReview(batchId, error.message)
+            return Result.failure()
         } catch (error: IOException) {
-            services.queue.updateBatch(
-                batchId,
-                QueueState.UPLOADED_WAITING_IMPORT,
-                error.message ?: "Could not read import status.",
+            services.scheduleBatchRetry(batchId, exponentialBackoffMillis(runAttemptCount + 1))
+            return Result.success()
+        } catch (error: Exception) {
+            markImportReview(batchId, error.message ?: "Could not confirm the server import result.")
+            return Result.failure()
+        }
+    }
+
+    private suspend fun uploadOne(item: TransferItem): UploadOutcome {
+        val current = services.queue.getBatch(item.batchId).firstOrNull { it.id == item.id } ?: return UploadOutcome()
+        if (current.state != QueueState.READY_TO_UPLOAD && current.state != QueueState.WAITING_FOR_INTERNET) {
+            return UploadOutcome()
+        }
+        val localFile = current.temporaryFilePath?.let(::File)
+        if (localFile == null || !localFile.isFile || localFile.length() == 0L) {
+            services.queue.update(
+                current.id,
+                QueueState.FAILED,
+                lastError = "The local original is missing. Reconnect the camera or reselect this image.",
             )
-            return Result.retry()
+            return UploadOutcome()
+        }
+
+        val attempt = current.attempts + 1
+        if (attempt > MAX_ATTEMPTS_PER_ITEM) {
+            services.queue.update(
+                current.id,
+                QueueState.FAILED,
+                lastError = current.lastError ?: "Upload stopped after $MAX_ATTEMPTS_PER_ITEM attempts.",
+            )
+            return UploadOutcome()
+        }
+        services.queue.update(
+            current.id,
+            QueueState.UPLOADING,
+            progressBytes = 0,
+            attempts = attempt,
+        )
+
+        return try {
+            services.api.uploadSelectedPhoto(
+                albumId = current.albumId,
+                uploadId = current.uploadId,
+                file = localFile,
+                mimeType = current.mimeType,
+            ) { sent, _ ->
+                services.queue.update(current.id, QueueState.UPLOADING, progressBytes = sent)
+            }
+            services.queue.update(
+                current.id,
+                QueueState.UPLOADED_WAITING_IMPORT,
+                progressBytes = localFile.length(),
+            )
+            UploadOutcome()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: WedFacesApiException) {
+            if (error.statusCode == 401) return UploadOutcome(authenticationRequired = true)
+            if (error.retryable && attempt < MAX_ATTEMPTS_PER_ITEM) {
+                services.queue.update(
+                    current.id,
+                    QueueState.WAITING_FOR_INTERNET,
+                    lastError = error.message,
+                )
+                UploadOutcome(
+                    retryDelayMillis = maxOf(
+                        exponentialBackoffMillis(attempt),
+                        error.retryAfterMillis ?: 0L,
+                    ),
+                )
+            } else {
+                services.queue.update(
+                    current.id,
+                    QueueState.FAILED,
+                    lastError = if (error.retryable) {
+                        "Upload failed after $MAX_ATTEMPTS_PER_ITEM attempts: ${error.message}"
+                    } else {
+                        error.message
+                    },
+                )
+                UploadOutcome()
+            }
+        } catch (error: IOException) {
+            if (attempt < MAX_ATTEMPTS_PER_ITEM) {
+                val message = error.message ?: "Network request failed."
+                services.queue.update(current.id, QueueState.WAITING_FOR_INTERNET, lastError = message)
+                UploadOutcome(retryDelayMillis = exponentialBackoffMillis(attempt))
+            } else {
+                services.queue.update(
+                    current.id,
+                    QueueState.FAILED,
+                    lastError = "Upload failed after $MAX_ATTEMPTS_PER_ITEM attempts: ${error.message ?: "Network request failed."}",
+                )
+                UploadOutcome()
+            }
+        } catch (error: Exception) {
+            services.queue.update(
+                current.id,
+                QueueState.FAILED,
+                lastError = error.message ?: "Transfer failed.",
+            )
+            UploadOutcome()
         }
     }
 
-    private fun finishImported(batchId: String, status: com.wedfaces.cameraoperator.model.ImportStatus) {
-        val items = services.queue.getBatch(batchId).filter { it.state != QueueState.CANCELLED }
-        val namedFailures = items.associateWith { item ->
-            status.failures.firstOrNull { failure -> failure.contains(item.fileName, ignoreCase = true) }
-        }.filterValues { it != null }
-        val reportedFailureCount = maxOf(status.failed ?: 0, namedFailures.size)
-        val unmatchedFailureCount = (reportedFailureCount - namedFailures.size).coerceAtLeast(0)
-
-        if (unmatchedFailureCount > 0) {
-            val error = "WED Faces reports $reportedFailureCount failed import(s), but the response did not identify every file. Verify the result in WED Faces before retrying."
-            namedFailures.forEach { (item, message) ->
-                services.queue.update(item.id, QueueState.FAILED, lastError = message)
-            }
-            items.filter { it !in namedFailures.keys }.forEach { item ->
-                services.queue.update(item.id, QueueState.IMPORT_REVIEW, lastError = error)
-            }
-            return
+    private suspend fun waitForImportStatus(
+        batchId: String,
+        albumId: String,
+        initial: ImportStatus,
+    ): ImportStatus {
+        var status = initial
+        repeat(24) {
+            if (isStopped || status.state != "RUNNING") return status
+            delay(5_000)
+            status = services.api.getAlbumImportStatus(albumId)
+            services.queue.saveImportStatus(batchId, status)
         }
+        return status
+    }
 
-        namedFailures.forEach { (item, message) ->
-            services.queue.update(item.id, QueueState.FAILED, lastError = message)
-        }
-        items.filter { it !in namedFailures.keys }.forEach { item ->
-            services.queue.update(item.id, QueueState.IMPORTED, lastError = null, importStarted = true)
-            item.temporaryFilePath?.let(::File)?.delete()
+    private fun finishImport(batchId: String, status: ImportStatus) {
+        services.queue.saveImportStatus(batchId, status)
+        ImportStatusReconciler.reconcile(services.queue.getBatch(batchId), status).forEach { result ->
+            services.queue.update(
+                result.item.id,
+                result.state,
+                lastError = result.error,
+                importStarted = result.state == QueueState.IMPORTED,
+            )
+            if (result.state == QueueState.IMPORTED) {
+                result.item.temporaryFilePath?.let(::File)?.delete()
+            }
         }
     }
+
+    private fun markImportReview(batchId: String, message: String) {
+        services.queue.getBatch(batchId)
+            .filter { it.state == QueueState.UPLOADED_WAITING_IMPORT }
+            .forEach { services.queue.update(it.id, QueueState.IMPORT_REVIEW, lastError = message) }
+    }
+
+    private fun scheduleImportRetry(batchId: String) {
+        services.scheduleBatchRetry(batchId, exponentialBackoffMillis(runAttemptCount + 1))
+    }
+
+    private fun exponentialBackoffMillis(attempt: Int): Long {
+        val multiplier = 1L shl (attempt.coerceIn(1, 10) - 1)
+        return TimeUnit.SECONDS.toMillis(30L * multiplier).coerceAtMost(MAX_BACKOFF_MILLIS)
+    }
+
+    private data class UploadOutcome(
+        val authenticationRequired: Boolean = false,
+        val retryDelayMillis: Long = 0L,
+    )
 
     companion object {
         const val KEY_BATCH_ID = "batch_id"
+        const val MAX_PARALLEL_UPLOADS = 3
+        const val MAX_ATTEMPTS_PER_ITEM = 5
+        private const val MAX_BACKOFF_MILLIS = 6 * 60 * 60 * 1_000L
     }
 }

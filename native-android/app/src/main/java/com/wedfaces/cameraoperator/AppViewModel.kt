@@ -449,12 +449,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         batch.filter {
             it.state == QueueState.FAILED ||
                 it.state == QueueState.WAITING_FOR_INTERNET ||
-                it.state == QueueState.IMPORT_REVIEW
+                it.state == QueueState.IMPORT_REVIEW ||
+                it.state == QueueState.AUTH_REQUIRED
         }
             .forEach { item ->
                 val path = item.temporaryFilePath?.let(::File)
                 if (path?.isFile == true) {
-                    services.queue.update(item.id, QueueState.READY_TO_UPLOAD, progressBytes = 0, lastError = null, importStarted = false)
+                    services.queue.update(
+                        item.id,
+                        QueueState.READY_TO_UPLOAD,
+                        progressBytes = 0,
+                        attempts = 0,
+                        lastError = null,
+                        importStarted = false,
+                    )
                 }
             }
         services.enqueueBatch(batchId)

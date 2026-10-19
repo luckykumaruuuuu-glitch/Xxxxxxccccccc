@@ -35,6 +35,7 @@ class WedFacesApiException(
     val statusCode: Int,
     override val message: String,
     val retryable: Boolean = statusCode == 0 || statusCode >= 500 || statusCode == 408 || statusCode == 429,
+    val retryAfterMillis: Long? = null,
 ) : Exception(message)
 
 class WedFacesApi(
@@ -176,7 +177,13 @@ class WedFacesApi(
             requestFactory(url).header("Accept", "application/json")
                 .header("Authorization", "Bearer $refreshed")
                 .build(),
-        ).execute()
+        ).execute().also { response ->
+            if (response.code == 401) {
+                response.close()
+                tokenStore.clear()
+                throw signInRequired()
+            }
+        }
     }
 
     private fun refreshSession(url: HttpUrl): String? {
@@ -246,14 +253,41 @@ class WedFacesApi(
 
     private fun ensureSuccess(response: Response, body: String, overrideMessage: String? = null) {
         if (response.isSuccessful) return
-        val message = overrideMessage ?: safeMessage(body) ?: when (response.code) {
+        val message = when (response.code) {
             401 -> "Your WED Faces session expired. Please sign in again."
+            else -> overrideMessage ?: safeMessage(body) ?: when (response.code) {
             403 -> "Your account does not have permission for this WED Faces action."
             413 -> "The server rejected this file because it exceeds the configured upload size limit."
             else -> "WED Faces request failed (HTTP ${response.code})."
+            }
         }
-        throw WedFacesApiException(response.code, message)
+        throw WedFacesApiException(
+            statusCode = response.code,
+            message = message,
+            retryAfterMillis = response.header("Retry-After")?.let(::parseRetryAfterMillis),
+        )
     }
+
+    private fun parseRetryAfterMillis(value: String): Long? {
+        value.trim().toLongOrNull()?.let { seconds ->
+            return seconds.coerceAtLeast(0).coerceAtMost(MAX_RETRY_AFTER_SECONDS) * 1_000L
+        }
+        return try {
+            val retryAt = java.time.ZonedDateTime.parse(
+                value,
+                java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME,
+            ).toInstant().toEpochMilli()
+            (retryAt - System.currentTimeMillis()).coerceIn(0L, MAX_RETRY_AFTER_MILLIS)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun signInRequired() = WedFacesApiException(
+        statusCode = 401,
+        message = "Your WED Faces session expired. Please sign in again.",
+        retryable = false,
+    )
 
     private fun safeMessage(body: String): String? {
         if (body.isBlank()) return null
@@ -326,6 +360,33 @@ class WedFacesApi(
             }
             else -> emptyList()
         }
+        val results = json.optJSONArray("results")?.let { array ->
+            (0 until array.length()).mapNotNull { index ->
+                val item = array.optJSONObject(index) ?: return@mapNotNull null
+                val uploadId = sequenceOf("uploadId", "upload_id")
+                    .mapNotNull { item.optString(it).takeIf(String::isNotBlank) }
+                    .firstOrNull()
+                val fileName = sequenceOf("fileName", "filename", "name")
+                    .mapNotNull { item.optString(it).takeIf(String::isNotBlank) }
+                    .firstOrNull()
+                val rawState = sequenceOf("state", "status", "result")
+                    .mapNotNull { item.optString(it).takeIf(String::isNotBlank) }
+                    .firstOrNull()
+                    ?.uppercase(Locale.ROOT)
+                val error = sequenceOf("error", "message", "detail")
+                    .mapNotNull { item.optString(it).takeIf(String::isNotBlank) }
+                    .firstOrNull()
+                val success = when {
+                    item.has("success") && !item.isNull("success") -> item.optBoolean("success")
+                    item.has("imported") && !item.isNull("imported") -> item.optBoolean("imported")
+                    error != null -> false
+                    rawState in SUCCESS_IMPORT_RESULTS -> true
+                    rawState in FAILURE_IMPORT_RESULTS -> false
+                    else -> null
+                }
+                com.wedfaces.cameraoperator.model.ImportFileResult(uploadId, fileName, success, error)
+            }
+        }
         return ImportStatus(
             state = state,
             total = json.optionalInt("total"),
@@ -334,6 +395,7 @@ class WedFacesApi(
             failed = json.optionalInt("failed"),
             failures = failures,
             error = json.optString("error").takeIf(String::isNotBlank),
+            results = results,
         )
     }
 
@@ -393,6 +455,10 @@ class WedFacesApi(
     }
 
     private companion object {
+        const val MAX_RETRY_AFTER_SECONDS = 6 * 60 * 60L
+        const val MAX_RETRY_AFTER_MILLIS = MAX_RETRY_AFTER_SECONDS * 1_000L
+        val SUCCESS_IMPORT_RESULTS = setOf("IMPORTED", "SUCCESS", "SUCCEEDED", "COMPLETED", "DONE", "DUPLICATE")
+        val FAILURE_IMPORT_RESULTS = setOf("FAILED", "ERROR", "REJECTED", "INVALID")
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaTypeOrNull()
         val SUPPORTED_MIME_TYPES = mapOf(
             "jpg" to "image/jpeg",

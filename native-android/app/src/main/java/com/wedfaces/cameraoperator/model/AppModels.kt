@@ -16,6 +16,7 @@ data class CameraPhoto(
     val mimeType: String?,
     val source: PhotoSource,
     val testUri: Uri? = null,
+    val alreadySent: Boolean = false,
 )
 
 enum class PhotoSource {
@@ -34,6 +35,7 @@ enum class QueueState(val title: String) {
     IMPORTED("Imported"),
     FAILED("Failed · retry available"),
     IMPORT_REVIEW("Import result needs review"),
+    AUTH_REQUIRED("Sign in again"),
     UNSUPPORTED("Unsupported format"),
     CANCELLED("Cancelled"),
 }
@@ -49,6 +51,7 @@ data class TransferItem(
     val fileName: String,
     val mimeType: String,
     val sizeBytes: Long?,
+    val sourceCapturedAtMillis: Long?,
     val temporaryFilePath: String?,
     val state: QueueState,
     val progressBytes: Long,
@@ -66,6 +69,14 @@ data class ImportStatus(
     val duplicates: Int?,
     val failed: Int?,
     val failures: List<String>,
+    val error: String?,
+    val results: List<ImportFileResult>? = null,
+)
+
+data class ImportFileResult(
+    val uploadId: String?,
+    val fileName: String?,
+    val success: Boolean?,
     val error: String?,
 )
 

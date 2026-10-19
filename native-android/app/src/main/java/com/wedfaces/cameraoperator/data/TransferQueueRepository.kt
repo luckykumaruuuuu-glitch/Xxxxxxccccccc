@@ -11,8 +11,10 @@ import com.wedfaces.cameraoperator.model.TransferItem
 import java.util.UUID
 import org.json.JSONArray
 
-class TransferQueueRepository(context: Context) :
-    SQLiteOpenHelper(context.applicationContext, DATABASE_NAME, null, DATABASE_VERSION) {
+class TransferQueueRepository(
+    context: Context,
+    databaseName: String = DATABASE_NAME,
+) : SQLiteOpenHelper(context.applicationContext, databaseName, null, DATABASE_VERSION) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -28,6 +30,7 @@ class TransferQueueRepository(context: Context) :
               file_name TEXT NOT NULL,
               mime_type TEXT NOT NULL,
               size_bytes INTEGER,
+              source_captured_at INTEGER,
               temporary_file_path TEXT,
               state TEXT NOT NULL,
               progress_bytes INTEGER NOT NULL,
@@ -42,11 +45,19 @@ class TransferQueueRepository(context: Context) :
         db.execSQL("CREATE INDEX transfers_batch_idx ON transfers(batch_id)")
         db.execSQL("CREATE INDEX transfers_updated_idx ON transfers(updated_at DESC)")
         createImportStatusTable(db)
+        createSentCameraObjectsTable(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) {
-            createImportStatusTable(db)
+            createImportStatusTable(db, includeResults = false)
+        }
+        if (oldVersion < 3) {
+            db.execSQL("ALTER TABLE $STATUS_TABLE ADD COLUMN results_json TEXT")
+        }
+        if (oldVersion < 4) {
+            db.execSQL("ALTER TABLE $TABLE ADD COLUMN source_captured_at INTEGER")
+            createSentCameraObjectsTable(db)
         }
     }
 
@@ -60,6 +71,19 @@ class TransferQueueRepository(context: Context) :
             putNullable("duplicates", status.duplicates)
             putNullable("failed", status.failed)
             put("failures_json", JSONArray(status.failures).toString())
+            put("results_json", status.results?.let { results ->
+                JSONArray().apply {
+                    results.forEach { result ->
+                        put(
+                            org.json.JSONObject()
+                                .put("uploadId", result.uploadId)
+                                .put("fileName", result.fileName)
+                                .put("success", result.success)
+                                .put("error", result.error),
+                        )
+                    }
+                }.toString()
+            })
             put("error", status.error)
             put("updated_at", System.currentTimeMillis())
         }
@@ -91,6 +115,26 @@ class TransferQueueRepository(context: Context) :
             } catch (_: Exception) {
                 emptyList()
             }
+            val resultsIndex = cursor.getColumnIndex("results_json")
+            val results = if (resultsIndex < 0 || cursor.isNull(resultsIndex)) {
+                null
+            } else {
+                try {
+                    val json = JSONArray(cursor.getString(resultsIndex))
+                    (0 until json.length()).mapNotNull { index ->
+                        json.optJSONObject(index)?.let { item ->
+                            com.wedfaces.cameraoperator.model.ImportFileResult(
+                                uploadId = item.optString("uploadId").takeIf(String::isNotBlank),
+                                fileName = item.optString("fileName").takeIf(String::isNotBlank),
+                                success = if (item.has("success") && !item.isNull("success")) item.optBoolean("success") else null,
+                                error = item.optString("error").takeIf(String::isNotBlank),
+                            )
+                        }
+                    }
+                } catch (_: Exception) {
+                    null
+                }
+            }
             ImportStatus(
                 state = cursor.getString(cursor.getColumnIndexOrThrow("state")),
                 total = cursor.nullableInt("total"),
@@ -99,12 +143,38 @@ class TransferQueueRepository(context: Context) :
                 failed = cursor.nullableInt("failed"),
                 failures = failures,
                 error = cursor.getString(cursor.getColumnIndexOrThrow("error")),
+                results = results,
             )
         }
 
     @Synchronized
     fun deleteImportStatus(batchId: String) {
         writableDatabase.delete(STATUS_TABLE, "batch_id = ?", arrayOf(batchId))
+    }
+
+    @Synchronized
+    fun isCameraObjectSent(objectName: String, sizeBytes: Long?, capturedAtMillis: Long?): Boolean =
+        readableDatabase.query(
+            SENT_TABLE,
+            arrayOf("identity_key"),
+            "identity_key = ?",
+            arrayOf(cameraIdentityKey(objectName, sizeBytes, capturedAtMillis)),
+            null,
+            null,
+            null,
+            "1",
+        ).use { it.moveToFirst() }
+
+    @Synchronized
+    fun markCameraObjectSent(objectName: String, sizeBytes: Long?, capturedAtMillis: Long?) {
+        val values = ContentValues().apply {
+            put("identity_key", cameraIdentityKey(objectName, sizeBytes, capturedAtMillis))
+            put("object_name", objectName)
+            if (sizeBytes == null) putNull("size_bytes") else put("size_bytes", sizeBytes)
+            if (capturedAtMillis == null) putNull("captured_at") else put("captured_at", capturedAtMillis)
+            put("sent_at", System.currentTimeMillis())
+        }
+        writableDatabase.insertWithOnConflict(SENT_TABLE, null, values, SQLiteDatabase.CONFLICT_REPLACE)
     }
 
     @Synchronized
@@ -159,7 +229,27 @@ class TransferQueueRepository(context: Context) :
             put("last_error", error)
             if (importStarted != null) put("import_started", if (importStarted) 1 else 0)
         }
-        writableDatabase.update(TABLE, values, "batch_id = ?", arrayOf(batchId))
+        writableDatabase.update(
+            TABLE,
+            values,
+            "batch_id = ? AND state NOT IN (?, ?)",
+            arrayOf(batchId, QueueState.IMPORTED.name, QueueState.CANCELLED.name),
+        )
+    }
+
+    @Synchronized
+    fun pauseBatchForAuthentication(batchId: String, error: String) {
+        val values = ContentValues().apply {
+            put("state", QueueState.AUTH_REQUIRED.name)
+            put("last_error", error)
+            put("updated_at", System.currentTimeMillis())
+        }
+        writableDatabase.update(
+            TABLE,
+            values,
+            "batch_id = ? AND state NOT IN (?, ?, ?)",
+            arrayOf(batchId, QueueState.IMPORTED.name, QueueState.CANCELLED.name, QueueState.FAILED.name),
+        )
     }
 
     @Synchronized
@@ -186,6 +276,7 @@ class TransferQueueRepository(context: Context) :
         put("file_name", fileName)
         put("mime_type", mimeType)
         if (sizeBytes == null) putNull("size_bytes") else put("size_bytes", sizeBytes)
+        if (sourceCapturedAtMillis == null) putNull("source_captured_at") else put("source_captured_at", sourceCapturedAtMillis)
         put("temporary_file_path", temporaryFilePath)
         put("state", state.name)
         put("progress_bytes", progressBytes)
@@ -200,7 +291,7 @@ class TransferQueueRepository(context: Context) :
         if (value == null) putNull(key) else put(key, value)
     }
 
-    private fun createImportStatusTable(db: SQLiteDatabase) {
+    private fun createImportStatusTable(db: SQLiteDatabase, includeResults: Boolean = true) {
         db.execSQL(
             """
             CREATE TABLE IF NOT EXISTS import_status (
@@ -212,11 +303,29 @@ class TransferQueueRepository(context: Context) :
               failed INTEGER,
               failures_json TEXT NOT NULL,
               error TEXT,
+              ${if (includeResults) "results_json TEXT," else ""}
               updated_at INTEGER NOT NULL
             )
             """.trimIndent(),
         )
     }
+
+    private fun createSentCameraObjectsTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS sent_camera_objects (
+              identity_key TEXT PRIMARY KEY NOT NULL,
+              object_name TEXT NOT NULL,
+              size_bytes INTEGER,
+              captured_at INTEGER,
+              sent_at INTEGER NOT NULL
+            )
+            """.trimIndent(),
+        )
+    }
+
+    private fun cameraIdentityKey(objectName: String, sizeBytes: Long?, capturedAtMillis: Long?) =
+        "${objectName.trim().lowercase(java.util.Locale.ROOT)}\u0000${sizeBytes ?: -1L}\u0000${capturedAtMillis ?: -1L}"
 
     private fun android.database.Cursor.toTransferItem(): TransferItem {
         fun string(column: String) = getString(getColumnIndexOrThrow(column))
@@ -239,6 +348,7 @@ class TransferQueueRepository(context: Context) :
             fileName = string("file_name"),
             mimeType = string("mime_type"),
             sizeBytes = nullableLong("size_bytes"),
+            sourceCapturedAtMillis = nullableLong("source_captured_at"),
             temporaryFilePath = nullableString("temporary_file_path"),
             state = QueueState.valueOf(string("state")),
             progressBytes = getLong(getColumnIndexOrThrow("progress_bytes")),
@@ -257,9 +367,10 @@ class TransferQueueRepository(context: Context) :
 
     companion object {
         private const val DATABASE_NAME = "camera_operator_queue.db"
-        private const val DATABASE_VERSION = 2
+        private const val DATABASE_VERSION = 4
         private const val TABLE = "transfers"
         private const val STATUS_TABLE = "import_status"
+        private const val SENT_TABLE = "sent_camera_objects"
 
         fun newTransfer(
             batchId: String,
@@ -270,6 +381,7 @@ class TransferQueueRepository(context: Context) :
             fileName: String,
             mimeType: String,
             sizeBytes: Long?,
+            sourceCapturedAtMillis: Long? = null,
             initialState: QueueState,
         ) = TransferItem(
             id = UUID.randomUUID().toString(),
@@ -282,6 +394,7 @@ class TransferQueueRepository(context: Context) :
             fileName = fileName,
             mimeType = mimeType,
             sizeBytes = sizeBytes,
+            sourceCapturedAtMillis = sourceCapturedAtMillis,
             temporaryFilePath = null,
             state = initialState,
             progressBytes = 0,
