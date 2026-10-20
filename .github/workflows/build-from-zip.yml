@@ -1,0 +1,70 @@
+name: Build APK from ZIP
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Find and unzip the project ZIP
+        run: |
+          ZIP=$(git diff-tree --no-commit-id --name-only -r HEAD | grep -i '\.zip$' | head -n1 || true)
+          if [ -z "$ZIP" ]; then
+            ZIP=$(find . -maxdepth 3 -iname '*.zip' -not -path './_unzipped/*' | head -n1)
+          fi
+          if [ -z "$ZIP" ]; then
+            echo "ERROR: repository me koi .zip file nahi mili. Project ki zip upload karein."
+            exit 1
+          fi
+          echo "Using ZIP: $ZIP"
+          mkdir -p _unzipped
+          unzip -q -o "$ZIP" -d _unzipped
+          GRADLEW=$(find _unzipped -name gradlew -type f | head -n1)
+          if [ -z "$GRADLEW" ]; then
+            echo "ERROR: zip ke andar gradlew nahi mila. Android project ki zip upload karein."
+            exit 1
+          fi
+          PROJECT_DIR=$(dirname "$GRADLEW")
+          echo "Project folder: $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          chmod +x "$GRADLEW"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;34.0.0 build-tools;35.0.1'
+
+      - name: Build debug APK
+        run: |
+          cd "$PROJECT_DIR"
+          ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Unit tests
+        continue-on-error: true
+        run: |
+          cd "$PROJECT_DIR"
+          ./gradlew :app:testDebugUnitTest --stacktrace
+
+      - name: Lint
+        continue-on-error: true
+        run: |
+          cd "$PROJECT_DIR"
+          ./gradlew :app:lintDebug --stacktrace
