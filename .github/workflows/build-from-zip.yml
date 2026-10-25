@@ -13,6 +13,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Finds the Android project folder automatically, so it works whether the
+      # project files are at the top of the repo or inside a sub-folder.
+      - name: Find the Android project folder
+        run: |
+          set -e
+          SETTINGS=$(find . -maxdepth 4 \( -name settings.gradle.kts -o -name settings.gradle \) -not -path "./.git/*" | head -1)
+          if [ -z "$SETTINGS" ]; then
+            echo "ERROR: settings.gradle.kts was not found anywhere in the repo."
+            echo "These are the files GitHub received (first 100):"
+            find . -maxdepth 3 -not -path "./.git/*" | head -100
+            exit 1
+          fi
+          ROOT=$(dirname "$SETTINGS")
+          echo "Android project folder: $ROOT"
+          echo "ROOT=$ROOT" >> "$GITHUB_ENV"
+          if [ -f "$ROOT/gradlew" ]; then
+            chmod +x "$ROOT/gradlew"
+            echo "USE_WRAPPER=true" >> "$GITHUB_ENV"
+            echo "Found gradlew, using it."
+          else
+            echo "USE_WRAPPER=false" >> "$GITHUB_ENV"
+            echo "gradlew is missing in the repo, using Gradle 8.9 installed by the workflow."
+          fi
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -23,17 +47,19 @@ jobs:
           packages: 'platform-tools platforms;android-35 build-tools;34.0.0 build-tools;35.0.1'
 
       - uses: gradle/actions/setup-gradle@v4
-
-      - name: Make gradlew executable
-        run: chmod +x ./gradlew
+        with:
+          gradle-version: '8.9'
 
       - name: Build debug APK
+        working-directory: ${{ env.ROOT }}
         run: |
           set -o pipefail
-          ./gradlew :app:assembleDebug --stacktrace 2>&1 | tee build.log
+          if [ "$USE_WRAPPER" = "true" ]; then GRADLE=./gradlew; else GRADLE=gradle; fi
+          $GRADLE :app:assembleDebug --stacktrace 2>&1 | tee build.log
 
       - name: Show the compile errors (only when the build fails)
         if: failure()
+        working-directory: ${{ env.ROOT }}
         run: |
           echo "=============== COMPILE ERRORS ==============="
           grep -E "^e: |error:|Unresolved reference|Type mismatch" build.log | head -60 || true
@@ -50,24 +76,31 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-log
-          path: build.log
+          path: ${{ env.ROOT }}/build.log
+          if-no-files-found: ignore
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: app-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ env.ROOT }}/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
       # Tests and lint run after the APK is saved, so a test/lint failure
       # does not block getting the APK. Check the logs/reports if these fail.
       - name: Unit tests
         continue-on-error: true
-        run: ./gradlew :app:testDebugUnitTest --stacktrace
+        working-directory: ${{ env.ROOT }}
+        run: |
+          if [ "$USE_WRAPPER" = "true" ]; then GRADLE=./gradlew; else GRADLE=gradle; fi
+          $GRADLE :app:testDebugUnitTest --stacktrace
 
       - name: Lint
         continue-on-error: true
-        run: ./gradlew :app:lintDebug --stacktrace
+        working-directory: ${{ env.ROOT }}
+        run: |
+          if [ "$USE_WRAPPER" = "true" ]; then GRADLE=./gradlew; else GRADLE=gradle; fi
+          $GRADLE :app:lintDebug --stacktrace
 
       - name: Upload reports
         if: always()
@@ -75,6 +108,6 @@ jobs:
         with:
           name: reports
           path: |
-            app/build/reports/
-            app/build/test-results/
+            ${{ env.ROOT }}/app/build/reports/
+            ${{ env.ROOT }}/app/build/test-results/
           if-no-files-found: ignore
