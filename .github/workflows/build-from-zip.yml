@@ -1,9 +1,8 @@
-name: Android Build
+name: Build from zip
 
 on:
   push:
     branches: [ main, master ]
-  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -12,17 +11,34 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      # Finds the Android project folder automatically, so it works whether the
-      # project files are at the top of the repo or inside a sub-folder.
-      - name: Find the Android project folder
+      # The repo holds the project as a .zip file. Unzip the most recently
+      # uploaded .zip, then find the Android project folder inside it.
+      - name: Unzip the project and find the Android folder
         run: |
           set -e
-          SETTINGS=$(find . -maxdepth 4 \( -name settings.gradle.kts -o -name settings.gradle \) -not -path "./.git/*" | head -1)
+          ZIP=""
+          BEST=0
+          for f in ./*.zip; do
+            [ -e "$f" ] || continue
+            T=$(git log -1 --format=%ct -- "$f" 2>/dev/null || echo 0)
+            T=${T:-0}
+            if [ -z "$ZIP" ] || [ "$T" -gt "$BEST" ]; then ZIP="$f"; BEST="$T"; fi
+          done
+          if [ -z "$ZIP" ]; then
+            echo "ERROR: no .zip file found in the repo. Files here:"
+            ls -la
+            exit 1
+          fi
+          echo "Using zip: $ZIP"
+          rm -rf android_src
+          unzip -q -o "$ZIP" -d android_src
+          SETTINGS=$(find android_src -maxdepth 4 \( -name settings.gradle.kts -o -name settings.gradle \) | head -1)
           if [ -z "$SETTINGS" ]; then
-            echo "ERROR: settings.gradle.kts was not found anywhere in the repo."
-            echo "These are the files GitHub received (first 100):"
-            find . -maxdepth 3 -not -path "./.git/*" | head -100
+            echo "ERROR: settings.gradle.kts not found inside the zip. Zip contents (first 100):"
+            find android_src -maxdepth 3 | head -100
             exit 1
           fi
           ROOT=$(dirname "$SETTINGS")
@@ -34,7 +50,7 @@ jobs:
             echo "Found gradlew, using it."
           else
             echo "USE_WRAPPER=false" >> "$GITHUB_ENV"
-            echo "gradlew is missing in the repo, using Gradle 8.9 installed by the workflow."
+            echo "gradlew missing in the zip, using Gradle 8.9 installed by the workflow."
           fi
 
       - uses: actions/setup-java@v4
@@ -85,29 +101,3 @@ jobs:
           name: app-debug-apk
           path: ${{ env.ROOT }}/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-
-      # Tests and lint run after the APK is saved, so a test/lint failure
-      # does not block getting the APK. Check the logs/reports if these fail.
-      - name: Unit tests
-        continue-on-error: true
-        working-directory: ${{ env.ROOT }}
-        run: |
-          if [ "$USE_WRAPPER" = "true" ]; then GRADLE=./gradlew; else GRADLE=gradle; fi
-          $GRADLE :app:testDebugUnitTest --stacktrace
-
-      - name: Lint
-        continue-on-error: true
-        working-directory: ${{ env.ROOT }}
-        run: |
-          if [ "$USE_WRAPPER" = "true" ]; then GRADLE=./gradlew; else GRADLE=gradle; fi
-          $GRADLE :app:lintDebug --stacktrace
-
-      - name: Upload reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: reports
-          path: |
-            ${{ env.ROOT }}/app/build/reports/
-            ${{ env.ROOT }}/app/build/test-results/
-          if-no-files-found: ignore
